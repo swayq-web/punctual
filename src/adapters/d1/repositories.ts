@@ -17,6 +17,7 @@
  */
 
 import { companyLogoFrom } from '../../core/domain/media.js'
+import { TOMBSTONE, normaliseGuestEmail } from '../../core/domain/guest-data.js'
 import type { HomeOwner } from '../../core/domain/home.js'
 import type { NotificationChannel } from '../../core/domain/chat-notify.js'
 import type {
@@ -39,6 +40,7 @@ import type {
   CalendarConnectionRepository,
   EventTypeHostRepository,
   EventTypeRepository,
+  GuestDataRepository,
   IdempotencyRepository,
   Repositories,
   RequestScope,
@@ -1733,9 +1735,106 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
     },
   }
 
+  // -------------------------------------------------------------------------
+  // Guest data lifecycle (SwayQ ADR-0082, SWA-1290)
+  // -------------------------------------------------------------------------
+  const changes = (r: D1Result): number => r.meta?.changes ?? 0
+  const T = TOMBSTONE
+  const guestData: GuestDataRepository = {
+    async anonymiseEndedBefore(cutoff, limit) {
+      // The subquery picks the batch (oldest first) and skips rows already
+      // carrying the tombstone. The tombstone address is a literal, not a
+      // bind, so SQLite can match the partial index bookings_retention_idx
+      // (migration 0019) and the sweep never re-scans tombstones.
+      return changes(
+        await q(
+          `UPDATE bookings
+              SET guest_name = ?, guest_email = ?, guest_timezone = ?, guest_locale = NULL, answers_json = ?
+            WHERE id IN (
+              SELECT id FROM bookings WHERE end_utc < ? AND guest_email <> '${T.guestEmail}' ORDER BY end_utc LIMIT ?
+            )`,
+          T.guestName, T.guestEmail, T.guestTimezone, T.answersJson, cutoff, limit,
+        ).run(),
+      )
+    },
+    async pruneExpiredIdempotency(now, limit) {
+      return changes(
+        await q(
+          `DELETE FROM idempotency_keys
+            WHERE rowid IN (SELECT rowid FROM idempotency_keys WHERE expires_at <= ? LIMIT ?)`,
+          now, limit,
+        ).run(),
+      )
+    },
+    async pruneExpiredMagicLinks(now, limit) {
+      return changes(
+        await q(
+          `DELETE FROM magic_link_tokens
+            WHERE token_hash IN (SELECT token_hash FROM magic_link_tokens WHERE expires_at <= ? LIMIT ?)`,
+          now, limit,
+        ).run(),
+      )
+    },
+    async listUpcomingConfirmedForGuest(email, now) {
+      // Stored guest emails are lower-cased at the write path
+      // (booking-service.ts), so this is a direct match on bookings_guest_email_idx.
+      const rows = await all<Record<string, unknown>>(
+        `SELECT * FROM bookings WHERE guest_email = ? AND status = 'confirmed' AND end_utc > ? ORDER BY start_utc`,
+        normaliseGuestEmail(email), now,
+      )
+      return rows.map((r) => mapBooking(r)!).filter(Boolean)
+    },
+    async eraseByEmail(rawEmail, audit, now) {
+      const email = normaliseGuestEmail(rawEmail)
+      // Refuse to "erase" the tombstone itself: that would match every
+      // already-anonymised row and report a meaningless count.
+      if (!email || email === T.guestEmail) return { bookings: 0, idempotency: 0, magicLinks: 0 }
+      const likeEscaped = email.replace(/[\\%_]/g, (c) => `\\${c}`)
+      // One atomic batch. `changes()` is the row count of the statement just
+      // before it, which is how the audit row learns each count without a
+      // second round trip; a failure anywhere rolls every statement back.
+      const results = await session.batch([
+        // Upcoming confirmed bookings are NEVER anonymised here: only the
+        // cancel path may end them (it frees the slot and removes the Google
+        // event). A booking that slipped in after the caller's cancel pass
+        // survives this statement and is reported back as still upcoming.
+        q(
+          `UPDATE bookings
+              SET guest_name = ?, guest_email = ?, guest_timezone = ?, guest_locale = NULL, answers_json = ?
+            WHERE guest_email = ? AND NOT (status = 'confirmed' AND end_utc > ?)`,
+          T.guestName, T.guestEmail, T.guestTimezone, T.answersJson, email, now,
+        ),
+        q(
+          `INSERT INTO guest_erasure_log
+             (id,at,actor_user_id,bookings_anonymised,bookings_cancelled,idempotency_deleted,magic_links_deleted)
+           VALUES (?,?,?,changes(),?,0,0)`,
+          audit.id, audit.at, audit.actorUserId, audit.bookingsCancelled,
+        ),
+        // Idempotency scope is `booking:<eventTypeId>:<lower-cased email>`
+        // (coordinator.ts); the stored response is `{"id":...}` only. The
+        // pattern is anchored at the end, so a longer address never matches.
+        q(`DELETE FROM idempotency_keys WHERE scope LIKE ? ESCAPE '\\'`, `booking:%:${likeEscaped}`),
+        q('UPDATE guest_erasure_log SET idempotency_deleted = changes() WHERE id = ?', audit.id),
+        // A host's own sign-in tokens are theirs, not a guest's: skipped when
+        // the address belongs to a user of this instance.
+        q('DELETE FROM magic_link_tokens WHERE email = ? AND NOT EXISTS (SELECT 1 FROM users WHERE email = ?)', email, email),
+        q('UPDATE guest_erasure_log SET magic_links_deleted = changes() WHERE id = ?', audit.id),
+        q('SELECT bookings_anonymised, idempotency_deleted, magic_links_deleted FROM guest_erasure_log WHERE id = ?', audit.id),
+      ])
+      const last = results[results.length - 1]!.results?.[0] as
+        | { bookings_anonymised: number; idempotency_deleted: number; magic_links_deleted: number }
+        | undefined
+      return {
+        bookings: Number(last?.bookings_anonymised ?? 0),
+        idempotency: Number(last?.idempotency_deleted ?? 0),
+        magicLinks: Number(last?.magic_links_deleted ?? 0),
+      }
+    },
+  }
+
   return {
     users, eventTypes, availability, bookings, slotLocks, teams, eventTypeHosts, connections,
-    sessions, apiKeys, webhooks, channels, idempotency, settings,
+    sessions, apiKeys, webhooks, channels, idempotency, guestData, settings,
     async telemetryCounts() {
       const row = await first<{ users: number; event_types: number; bookings: number }>(
         `SELECT

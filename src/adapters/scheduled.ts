@@ -11,6 +11,7 @@ import type { EnginePorts } from '../ports.js'
 import type { Booking, EventType, User } from '../core/domain/types.js'
 import { classifyCalendarError, isCalendarSyncRetry, logSync } from './calendar-sync-errors.js'
 import { alertCalendarSync } from './calendar-sync-alerts.js'
+import { purgeExpiredGuestData } from './guest-data.js'
 
 const MINUTE = 60_000
 const HOUR = 3_600_000
@@ -23,6 +24,7 @@ export async function runScheduledTasks(ports: EnginePorts, now: number): Promis
     ['reminders', sendReminders(ports, now)],
     ['digests', sendDigests(ports, now)],
     ['calendar-reconcile', reconcileCalendarSync(ports, now)],
+    ['guest-data-retention', purgeExpiredGuestData(ports, now)],
   ]
   if (ports.config.telemetryEnabled) tasks.push(['telemetry', sendTelemetry(ports, now)])
 
