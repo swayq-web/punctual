@@ -53,6 +53,7 @@ import { slotStateClassName } from '../../core/slot-state.js'
 import { slugify } from '../../core/domain/booking-service.js'
 import { formatInZone, offsetLabel } from '../../core/time/zone.js'
 import type { ResolvedHost } from '../../core/domain/hosts.js'
+import { SWAYQ_SURFACES } from '../../swayq-surfaces.js'
 import { avatarHtml, escapeHtml, hostsSentence, joinNames, logoHtml, shellFoot, shellHead } from './booking.js'
 
 // ---------------------------------------------------------------------------
@@ -142,8 +143,17 @@ export function csrfField(csrf: string): string {
  * any `<img>` on any page on the internet, and the CSRF token cannot travel on
  * a link the user might bookmark.
  */
+/** SwayQ surface switches (src/swayq-surfaces.ts): a switched-off surface has no nav entry. */
+function navAllowed(key: NavKey): boolean {
+  if (key === 'insights') return SWAYQ_SURFACES.insights
+  if (key === 'keys') return SWAYQ_SURFACES.apiKeys
+  if (key === 'teams') return SWAYQ_SURFACES.teamScheduling
+  return true
+}
+
 function shellTop(chrome: DashboardChrome, title: string, active: NavKey | null): string {
-  const links = NAV.filter((item) => item.key !== 'admin' || chrome.user.role === 'admin')
+  const links = NAV.filter((item) => navAllowed(item.key))
+    .filter((item) => item.key !== 'admin' || chrome.user.role === 'admin')
     .map((item) => {
       const current = item.key === active ? ' aria-current="page"' : ''
       return `<a class="pu-nav-link" href="${item.href}"${current}>${escapeHtml(item.label)}</a>`
@@ -940,6 +950,8 @@ ${
  * crafted scheduling value cannot make a personal event round-robin.
  */
 function ownershipFields(d: EventTypeFormData, teams: Team[], errors: Record<string, string>): string {
+  // Team-owned event types (round robin, collective) are switched off for SwayQ; a new one is personal.
+  if (!SWAYQ_SURFACES.teamScheduling && !d.eventType?.ownerTeamId) return ''
   // No teams, no selects — but a crafted POST naming a team the user is not
   // in still needs its refusal VISIBLE, or the 400 renders with no explanation.
   if (teams.length === 0) return fieldError('owner', errors)
@@ -1947,13 +1959,16 @@ export function connectionsPage(d: ConnectionsPageData): string {
       ? `<p class="pu-muted">No calendars connected. Bookings still work — nothing will be checked for conflicts.</p>`
       : d.connections.map((c) => connectionCard(d, c)).join('\n')
 
+  // Microsoft is switched off for SwayQ (src/swayq-surfaces.ts).
+  const providers = d.availableProviders.filter((p) => p !== 'microsoft' || SWAYQ_SURFACES.microsoft)
+
   // The reader is the host, who usually cannot set a secret; only when they
   // also run the deployment is the fix theirs to make.
   const connectButtons =
-    d.availableProviders.length === 0
+    providers.length === 0
       ? `<p class="pu-muted">This deployment has no Google or Microsoft credentials yet. If you run it, see
        <a href="/docs/self-hosting">self-hosting &rarr; calendar providers</a>; otherwise ask your admin.</p>`
-      : d.availableProviders
+      : providers
           .map(
             (p) =>
               `<a class="pu-btn" style="margin-right:.75rem" href="/auth/${p}/start?purpose=calendar">Connect ${escapeHtml(providerLabel(p))} Calendar</a>`,
@@ -2305,19 +2320,25 @@ export function channelsPanel(o: {
   ).join('')
   return `${list}
   <details class="pu-channel-add"${o.errors[o.errorKey] ? ' open' : ''}>
-    <summary>Add a Slack or Telegram channel</summary>
+    <summary>${SWAYQ_SURFACES.telegram ? 'Add a Slack or Telegram channel' : 'Add a Slack channel'}</summary>
     <form method="post" action="${escapeHtml(o.action)}" style="margin-top:.75rem">
       ${csrfField(o.csrf)}
       ${fieldError(o.errorKey, o.errors)}
-      <fieldset style="border:0;padding:0;margin:0 0 .75rem">
+      ${
+        SWAYQ_SURFACES.telegram
+          ? `<fieldset style="border:0;padding:0;margin:0 0 .75rem">
         <legend class="pu-sr">Service</legend>
         <label style="display:inline-flex;align-items:center;gap:.3rem;margin-right:1rem;font-weight:400"><input type="radio" name="kind" value="slack"${kind === 'slack' ? ' checked' : ''}> Slack</label>
         <label style="display:inline-flex;align-items:center;gap:.3rem;font-weight:400"><input type="radio" name="kind" value="telegram"${kind === 'telegram' ? ' checked' : ''}> Telegram</label>
-      </fieldset>
+      </fieldset>`
+          : '<input type="hidden" name="kind" value="slack">'
+      }
       <label for="${p}-webhook">Slack incoming webhook URL</label>
       <input id="${p}-webhook" name="webhook_url" type="url" inputmode="url" maxlength="300" placeholder="https://hooks.slack.com/services/T…/B…/…" value="${escapeHtml(draft.webhookUrl ?? '')}" autocomplete="off">
-      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Slack: your workspace → Apps → Incoming Webhooks → Add to a channel, then paste the URL. Leave blank for Telegram.</p>
-      <div class="pu-grid" style="grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:0 1rem">
+      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Slack: your workspace → Apps → Incoming Webhooks → Add to a channel, then paste the URL.${SWAYQ_SURFACES.telegram ? ' Leave blank for Telegram.' : ''}</p>
+      ${
+        SWAYQ_SURFACES.telegram
+          ? `<div class="pu-grid" style="grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:0 1rem">
         <div>
           <label for="${p}-token">Telegram bot token</label>
           <input id="${p}-token" name="bot_token" type="password" maxlength="100" placeholder="123456789:AAH…" autocomplete="off">
@@ -2327,7 +2348,9 @@ export function channelsPanel(o: {
           <input id="${p}-chat" name="chat_id" maxlength="40" placeholder="-1001234567890 or @channel" value="${escapeHtml(draft.chatId ?? '')}" autocomplete="off">
         </div>
       </div>
-      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Telegram: make a bot with @BotFather, add it to the group or channel, and get the chat id from @userinfobot or the bot's getUpdates. Leave blank for Slack.</p>
+      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Telegram: make a bot with @BotFather, add it to the group or channel, and get the chat id from @userinfobot or the bot's getUpdates. Leave blank for Slack.</p>`
+          : ''
+      }
       <p style="font-weight:600;margin:0 0 .25rem">Tell me about</p>
       <div>${events}</div>
       <div style="margin-top:.75rem"><button class="pu-btn" type="submit">Add channel</button></div>
@@ -2366,7 +2389,10 @@ export function settingsPage(d: SettingsPageData): string {
   <div class="pu-profile">
     <div class="pu-profile-photo">
       ${avatarHtml({ key: d.user.avatarKey, name: d.user.name, size: 88 })}
-      <form method="post" action="/dashboard/settings/avatar" enctype="multipart/form-data">
+      ${
+        !SWAYQ_SURFACES.avatars
+          ? ''
+          : `<form method="post" action="/dashboard/settings/avatar" enctype="multipart/form-data">
         ${csrfField(d.csrf)}
         <label class="pu-btn pu-btn-ghost pu-file-btn">Upload photo
           <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp" class="pu-sr"
@@ -2383,7 +2409,8 @@ export function settingsPage(d: SettingsPageData): string {
           : ''
       }
       <p class="pu-muted" style="font-size:.75rem;margin:0;text-align:center">PNG, JPEG or WebP,<br>up to 5&nbsp;MB</p>
-      ${fieldError('avatar', errors)}
+      ${fieldError('avatar', errors)}`
+      }
     </div>
     <form method="post" action="/dashboard/settings/profile" class="pu-profile-fields">
       ${csrfField(d.csrf)}

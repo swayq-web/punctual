@@ -348,7 +348,7 @@ function plain(input: ShellInput): string {
     }
   }
   for (const n of input.notes ?? []) out.push('', n)
-  out.push('', `— ${input.brandName}`)
+  out.push('', input.brandName)
   return out.join('\n')
 }
 
