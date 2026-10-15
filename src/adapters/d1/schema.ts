@@ -386,6 +386,17 @@ export const idempotencyKeys = sqliteTable(
   ],
 )
 
+/** Audit line for an admin's guest erasure: counts only, never the email (migration 0019). */
+export const guestErasureLog = sqliteTable('guest_erasure_log', {
+  id: text('id').primaryKey(),
+  at: integer('at').notNull(),
+  actorUserId: text('actor_user_id').notNull(),
+  bookingsAnonymised: integer('bookings_anonymised').notNull(),
+  bookingsCancelled: integer('bookings_cancelled').notNull(),
+  idempotencyDeleted: integer('idempotency_deleted').notNull(),
+  magicLinksDeleted: integer('magic_links_deleted').notNull(),
+})
+
 /** Round-robin fairness: when each member was last assigned (ADR-0004 §5). */
 export const rrAssignments = sqliteTable(
   'rr_assignments',

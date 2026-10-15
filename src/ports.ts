@@ -64,6 +64,7 @@ export interface Repositories {
   webhooks: WebhookRepository
   channels: NotificationChannelRepository
   idempotency: IdempotencyRepository
+  guestData: GuestDataRepository
   settings: SettingsRepository
 
   /** Counts for the opt-in telemetry ping (ADR-0006 §5). Nothing identifying. */
@@ -595,6 +596,35 @@ export interface NotificationChannelRepository {
   byId(id: string): Promise<NotificationChannel | null>
   create(channel: NotificationChannel): Promise<void>
   delete(id: string): Promise<void>
+}
+
+/**
+ * Guest personal data lifecycle (SwayQ ADR-0082 retention promise; SWA-1290).
+ * Every method is a bounded or targeted write. The one read,
+ * `listUpcomingConfirmedForGuest`, exists so the erase action can cancel
+ * through the normal path before anonymising.
+ */
+export interface GuestDataRepository {
+  /** Anonymise up to `limit` not-yet-tombstoned bookings that ENDED before `cutoff`. @returns rows changed. */
+  anonymiseEndedBefore(cutoff: number, limit: number): Promise<number>
+  /** Delete up to `limit` idempotency records past their own expiry. */
+  pruneExpiredIdempotency(now: number, limit: number): Promise<number>
+  /** Delete up to `limit` expired login tokens (they carry an email address). */
+  pruneExpiredMagicLinks(now: number, limit: number): Promise<number>
+  /** Confirmed bookings for this guest email that have not ended yet. */
+  listUpcomingConfirmedForGuest(email: string, now: number): Promise<Booking[]>
+  /** Anonymise every booking and delete every idempotency/login record for this email. */
+  eraseByEmail(email: string): Promise<{ bookings: number; idempotency: number; magicLinks: number }>
+  /** The audit line: counts only. */
+  recordErasure(entry: {
+    id: string
+    at: number
+    actorUserId: string
+    bookingsAnonymised: number
+    bookingsCancelled: number
+    idempotencyDeleted: number
+    magicLinksDeleted: number
+  }): Promise<void>
 }
 
 export interface IdempotencyRepository {

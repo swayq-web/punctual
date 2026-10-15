@@ -3321,6 +3321,21 @@ export function adminPage(d: AdminPageData): string {
   <p class="pu-muted">What a visitor sees at <code>/</code> on this instance.</p>
   ${homepageForm(d, errors)}
 </section>
+<section class="pu-card" aria-label="Erase guest data" style="margin-bottom:1.25rem">
+  <h2>Erase guest data</h2>
+  <p class="pu-muted">On a guest's request: removes their name, email and answers from every booking on this instance, across all hosts. Their upcoming meetings are cancelled first, and they are told. Meetings that already happened stay in Google Calendar until deleted there by hand (see the data-retention notes). Everything older than twelve months is erased automatically.</p>
+  <form method="post" action="/dashboard/admin/erase-guest">
+    ${csrfField(d.csrf)}
+    <label for="erase-guest-email">Guest email</label>
+    <input id="erase-guest-email" name="email" type="email" required autocomplete="off" placeholder="guest@example.com"${describedBy('erase-guest', errors)}>
+    ${fieldError('erase-guest', errors)}
+    <label style="display:flex;align-items:baseline;gap:.5rem;font-weight:400;margin:.75rem 0 0">
+      <input type="checkbox" name="confirm" value="yes" required style="width:auto">
+      <span>I understand this cannot be undone.</span>
+    </label>
+    <div style="margin-top:1rem"><button class="pu-btn" type="submit">Erase this guest</button></div>
+  </form>
+</section>
 <section class="pu-card" aria-label="Users">
   <h2>Users</h2>
   ${fieldError('role', errors)}

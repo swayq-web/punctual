@@ -17,6 +17,7 @@
  */
 
 import { companyLogoFrom } from '../../core/domain/media.js'
+import { TOMBSTONE, normaliseGuestEmail } from '../../core/domain/guest-data.js'
 import type { HomeOwner } from '../../core/domain/home.js'
 import type { NotificationChannel } from '../../core/domain/chat-notify.js'
 import type {
@@ -39,6 +40,7 @@ import type {
   CalendarConnectionRepository,
   EventTypeHostRepository,
   EventTypeRepository,
+  GuestDataRepository,
   IdempotencyRepository,
   Repositories,
   RequestScope,
@@ -1733,9 +1735,91 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
     },
   }
 
+  // -------------------------------------------------------------------------
+  // Guest data lifecycle (SwayQ ADR-0082, SWA-1290)
+  // -------------------------------------------------------------------------
+  const changes = (r: D1Result): number => r.meta?.changes ?? 0
+  const T = TOMBSTONE
+  const guestData: GuestDataRepository = {
+    async anonymiseEndedBefore(cutoff, limit) {
+      // The subquery picks the batch (oldest first) and skips rows already
+      // carrying the tombstone, so a second run over the same data matches
+      // nothing and the bound is on rows actually changed.
+      return changes(
+        await q(
+          `UPDATE bookings
+              SET guest_name = ?, guest_email = ?, guest_timezone = ?, guest_locale = NULL, answers_json = ?
+            WHERE id IN (
+              SELECT id FROM bookings WHERE end_utc < ? AND guest_email <> ? ORDER BY end_utc LIMIT ?
+            )`,
+          T.guestName, T.guestEmail, T.guestTimezone, T.answersJson, cutoff, T.guestEmail, limit,
+        ).run(),
+      )
+    },
+    async pruneExpiredIdempotency(now, limit) {
+      return changes(
+        await q(
+          `DELETE FROM idempotency_keys
+            WHERE rowid IN (SELECT rowid FROM idempotency_keys WHERE expires_at <= ? LIMIT ?)`,
+          now, limit,
+        ).run(),
+      )
+    },
+    async pruneExpiredMagicLinks(now, limit) {
+      return changes(
+        await q(
+          `DELETE FROM magic_link_tokens
+            WHERE token_hash IN (SELECT token_hash FROM magic_link_tokens WHERE expires_at <= ? LIMIT ?)`,
+          now, limit,
+        ).run(),
+      )
+    },
+    async listUpcomingConfirmedForGuest(email, now) {
+      const rows = await all<Record<string, unknown>>(
+        `SELECT * FROM bookings WHERE lower(guest_email) = ? AND status = 'confirmed' AND end_utc > ? ORDER BY start_utc`,
+        normaliseGuestEmail(email), now,
+      )
+      return rows.map((r) => mapBooking(r)!).filter(Boolean)
+    },
+    async eraseByEmail(rawEmail) {
+      const email = normaliseGuestEmail(rawEmail)
+      // Refuse to "erase" the tombstone itself: that would match every
+      // already-anonymised row and report a meaningless count.
+      if (!email || email === T.guestEmail) return { bookings: 0, idempotency: 0, magicLinks: 0 }
+      const likeEscaped = email.replace(/[\\%_]/g, (c) => `\\${c}`)
+      const bookingsChanged = changes(
+        await q(
+          `UPDATE bookings
+              SET guest_name = ?, guest_email = ?, guest_timezone = ?, guest_locale = NULL, answers_json = ?
+            WHERE lower(guest_email) = ?`,
+          T.guestName, T.guestEmail, T.guestTimezone, T.answersJson, email,
+        ).run(),
+      )
+      // Idempotency rows carry the guest in two places: the scope
+      // (`booking:<eventTypeId>:<email>`) and the stored response body.
+      const idempotencyChanged = changes(
+        await q(
+          `DELETE FROM idempotency_keys
+            WHERE lower(scope) LIKE ? ESCAPE '\\' OR instr(lower(response_json), ?) > 0`,
+          `booking:%:${likeEscaped}`, email,
+        ).run(),
+      )
+      const magicChanged = changes(await q('DELETE FROM magic_link_tokens WHERE email = ?', email).run())
+      return { bookings: bookingsChanged, idempotency: idempotencyChanged, magicLinks: magicChanged }
+    },
+    async recordErasure(e) {
+      await run(
+        `INSERT INTO guest_erasure_log
+           (id,at,actor_user_id,bookings_anonymised,bookings_cancelled,idempotency_deleted,magic_links_deleted)
+         VALUES (?,?,?,?,?,?,?)`,
+        e.id, e.at, e.actorUserId, e.bookingsAnonymised, e.bookingsCancelled, e.idempotencyDeleted, e.magicLinksDeleted,
+      )
+    },
+  }
+
   return {
     users, eventTypes, availability, bookings, slotLocks, teams, eventTypeHosts, connections,
-    sessions, apiKeys, webhooks, channels, idempotency, settings,
+    sessions, apiKeys, webhooks, channels, idempotency, guestData, settings,
     async telemetryCounts() {
       const row = await first<{ users: number; event_types: number; bookings: number }>(
         `SELECT

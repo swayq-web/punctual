@@ -503,6 +503,7 @@ export function createFakeRepositories(): FakeRepositories {
       },
     },
     idempotency: unimplemented('idempotency'),
+    guestData: unimplemented('guestData'),
     settings: createFakeSettings(),
     bookmark() {
       return lastBookmark

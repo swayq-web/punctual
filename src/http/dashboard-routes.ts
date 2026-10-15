@@ -100,6 +100,7 @@ import { MAX_DECODED_PIXELS,
 import { resizeToFitThumbnail, resizeToSquareThumbnail } from '../adapters/image/resize.js'
 import { errorPage, shellFoot, shellHead } from './pages/booking.js'
 import { manageHeaders, manageResultPage } from './pages/manage.js'
+import { eraseGuestByEmail } from '../adapters/guest-data.js'
 import { langCookieHeader, resolveLocale, t, type Locale, type MessageKey } from '../core/i18n/index.js'
 import {
   CSRF_FIELD,
@@ -2558,6 +2559,61 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     await advanceBookmark(c)
     return renderAdmin(c, { notice: 'Company logo removed.' })
   })
+
+  /**
+   * Erase one guest on request (SwayQ ADR-0082, SWA-1290). Instance admins
+   * only, and a destructive POST answers a non-admin with 403 rather than the
+   * redirect `requireAdmin` gives a page GET: nothing about it should look
+   * like it half-worked. CSRF-checked like every dashboard POST.
+   */
+  app.post(
+    '/dashboard/admin/erase-guest',
+    requireSession,
+    async (c, next) => {
+      if (c.get('user').role !== 'admin') return c.text('Forbidden', 403)
+      await next()
+      return undefined
+    },
+    async (c) => {
+      const form = await c.req.formData()
+      if (!(await csrfOk(c, form))) return csrfRejected(c)
+      const email = String(form.get('email') ?? '').trim()
+      if (!email.includes('@') || email.length > 320) {
+        return renderAdmin(c, { errors: { 'erase-guest': 'Enter the guest’s full email address.' } }, 400)
+      }
+      if (String(form.get('confirm') ?? '') !== 'yes') {
+        return renderAdmin(c, { errors: { 'erase-guest': 'Tick the box to confirm.' } }, 400)
+      }
+      const repos = c.get('repos')
+      let result
+      try {
+        result = await eraseGuestByEmail(
+          {
+            repos,
+            now: ports.clock.now(),
+            actorUserId: c.get('user').id,
+            newId: () => `ger_${ports.crypto.randomToken(12)}`,
+            cancel: (booking) =>
+              cancelBooking(repos, booking, {
+                cancelledBy: 'host',
+                actor: c.get('user'),
+                reason: 'Your booking was cancelled because your personal data was erased at your request.',
+              }),
+          },
+          email,
+        )
+      } catch {
+        // Nothing is anonymised when a cancel throws; the admin can repeat it.
+        console.error(JSON.stringify({ source: 'punctual.guest_data', event: 'erase_failed' }))
+        return renderAdmin(c, { errors: { 'erase-guest': 'Could not cancel an upcoming meeting, so nothing was erased. Try again.' } }, 500)
+      }
+      await advanceBookmark(c)
+      const { bookingsAnonymised: n, bookingsCancelled: k } = result
+      return renderAdmin(c, {
+        notice: `Erased ${n} booking${n === 1 ? '' : 's'}${k > 0 ? `, ${k} upcoming meeting${k === 1 ? '' : 's'} cancelled first` : ''}. Past events in Google Calendar are not touched.`,
+      })
+    },
+  )
 
   app.post('/dashboard/admin/signups', requireSession, requireAdmin, async (c) => {
     const form = await c.req.formData()
