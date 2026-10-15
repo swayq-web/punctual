@@ -60,7 +60,7 @@ export const createMeetingSchema = z
     end: instant,
     timezone,
     title: z.string().trim().min(1).max(200),
-    description: z.string().max(8000).optional(),
+    description: z.string().max(2000).optional(),
     idempotencyKey: z.string().min(8).max(200),
   })
   .refine((v) => v.end > v.start, { message: 'end must be after start', path: ['end'] })

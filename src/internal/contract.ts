@@ -32,6 +32,8 @@ export type InternalErrorCode =
   | 'NOT_FOUND'
   /** The event is not an internal meeting organized by the acting user. */
   | 'NOT_OWNER'
+  /** The event changed between read and write (Google 412 on If-Match); nothing was changed. */
+  | 'CONCURRENT_MODIFICATION'
   /** The idempotency key was already used for a different (or cancelled) meeting. */
   | 'IDEMPOTENCY_CONFLICT'
   /** Google refused or failed the write. No details cross the boundary. */
@@ -86,8 +88,13 @@ export interface CreateMeetingInput extends Authed {
   end: string
   timezone: string
   title: string
+  /** <= 2000 chars. A fixed line "Created by the SwayQ assistant for <actor>." is appended. */
   description?: string
-  /** Caller-chosen; a retry with the same key returns the same event. */
+  /**
+   * Derived by the caller from the request (e.g. a hash of the MCP request
+   * id), never minted per call: a retry with the same key returns the same
+   * event, a fresh key per attempt creates duplicates.
+   */
   idempotencyKey: string
 }
 
@@ -164,6 +171,12 @@ export interface CancelMeetingOutput {
   eventId: string
   /** false when the event was already gone. */
   cancelled: boolean
+  /**
+   * Addresses Google sent the cancellation to (everyone on the event except
+   * the organizer), including any guest added by hand in Google. Empty when
+   * nothing was cancelled.
+   */
+  notified: string[]
 }
 
 export interface BookingLink {

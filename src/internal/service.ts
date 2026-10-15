@@ -63,7 +63,7 @@ import {
   normalizeEmail,
   rescheduleMeetingSchema,
 } from './schemas.js'
-import { verifyServiceToken } from './token.js'
+import { parseAllowedDomains, verifyServiceToken } from './token.js'
 
 export interface InternalServiceDeps {
   ports: Pick<EnginePorts, 'repositories' | 'calendars' | 'clock' | 'config'>
@@ -71,8 +71,12 @@ export interface InternalServiceDeps {
   providerDeps: CalendarProviderDeps
   /** INTERNAL_SERVICE_TOKEN. Unset or blank refuses every call. */
   serviceToken: string | undefined
-  /** Optional second gate on actor and attendees: lowercase domains, e.g. ["swayq.com"]. Empty = no domain gate. */
-  allowedDomains?: string[]
+  /**
+   * INTERNAL_ALLOWED_DOMAINS, raw (e.g. "swayq.com"). REQUIRED: unset, empty
+   * or any malformed entry refuses every call with SERVICE_NOT_CONFIGURED.
+   * Applied to the actor and to every attendee.
+   */
+  allowedDomains: string | undefined
   /** Error sink. Receives the method and error NAME only, never messages or bodies. */
   logError?: (method: string, errorName: string) => void
 }
@@ -112,7 +116,7 @@ const PER_DAY_SPREAD = 3
 
 export function createInternalService(deps: InternalServiceDeps): InternalService {
   const { ports, providerDeps } = deps
-  const allowedDomains = (deps.allowedDomains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean)
+  const allowedDomains = parseAllowedDomains(deps.allowedDomains)
   const logError = deps.logError ?? ((method, name) => console.error(`[punctual internal] ${method} failed: ${name}`))
 
   /**
@@ -128,7 +132,7 @@ export function createInternalService(deps: InternalServiceDeps): InternalServic
     try {
       const presented = isObject(raw) ? raw['token'] : undefined
       const verdict = await verifyServiceToken(deps.serviceToken, presented)
-      if (verdict === 'not_configured') {
+      if (verdict === 'not_configured' || allowedDomains === null) {
         return { ok: false, code: 'SERVICE_NOT_CONFIGURED', message: 'internal API is not configured on this deployment' }
       }
       if (verdict !== 'ok') return { ok: false, code: 'UNAUTHORIZED', message: 'invalid service token' }
@@ -159,7 +163,8 @@ export function createInternalService(deps: InternalServiceDeps): InternalServic
   }
 
   function domainAllowed(email: string): boolean {
-    if (allowedDomains.length === 0) return true
+    // Unreachable with a null gate (run() refuses first); fail closed anyway.
+    if (allowedDomains === null) return false
     const domain = email.slice(email.lastIndexOf('@') + 1)
     return allowedDomains.includes(domain)
   }
@@ -254,10 +259,16 @@ export function createInternalService(deps: InternalServiceDeps): InternalServic
     }
   }
 
-  function busyEmails(users: User[], busy: Map<string, Interval[]>, slot: Interval, ignore?: Interval): string[] {
+  function busyEmails(
+    users: User[],
+    busy: Map<string, Interval[]>,
+    slot: Interval,
+    ignoreFor?: (user: User) => Interval | null,
+  ): string[] {
     return users
       .filter((u) => {
         let blocks = busy.get(u.id) ?? []
+        const ignore = ignoreFor?.(u) ?? null
         if (ignore) blocks = subtractIntervals(blocks, [ignore])
         return overlapsAny(slot, blocks)
       })
@@ -355,7 +366,7 @@ export function createInternalService(deps: InternalServiceDeps): InternalServic
           googleEventId: stable.googleEventId,
           conferenceRequestId: `swayq-${stable.short}`,
           title: input.title,
-          description: input.description ?? '',
+          description: withFooter(input.description, actor.email),
           start: input.start,
           end: input.end,
           timezone: input.timezone,
@@ -410,18 +421,41 @@ export function createInternalService(deps: InternalServiceDeps): InternalServic
         const participants = [actor, ...attendees]
         const slot = { start: input.start, end: input.end }
         const busy = await freshBusy(repos, participants, slot)
-        // The meeting's own current slot shows as busy for everyone on it;
-        // moving it by 15 minutes must not collide with itself.
-        const busyNow = busyEmails(participants, busy, slot, { start: ev.start, end: ev.end })
+        // The meeting's own current slot shows as busy for the organizer and
+        // for every attendee who has not declined it; moving it by 15
+        // minutes must not collide with itself. A DECLINED attendee's
+        // freeBusy does not include this meeting, so anything busy in the
+        // old slot for them is a different commitment and must still count.
+        const oldSlot = { start: ev.start, end: ev.end }
+        const status = new Map(ev.attendees.map((a) => [a.email, a.responseStatus]))
+        const busyNow = busyEmails(participants, busy, slot, (u) =>
+          u.id === actor.id || status.get(u.email.toLowerCase()) !== 'declined' ? oldSlot : null,
+        )
         if (busyNow.length > 0) refuse('SLOT_BUSY', 'a participant is busy in that slot', { busyEmails: busyNow })
 
         const timezone = input.timezone ?? actor.tz
-        const patched = await patchInternalEventTime(providerDeps, conn, calendarId, ev.id, {
+        // If-Match on the etag read above: if anyone changed the event in
+        // between (an attendee added by hand, a time moved), Google answers
+        // 412 and nothing is sent to anyone.
+        const patched = await patchInternalEventTime(providerDeps, conn, calendarId, ev.id, ev.etag, {
           start: input.start,
           end: input.end,
           timezone,
         })
-        const out = patched ?? { ...ev, start: input.start, end: input.end }
+        if (patched.kind === 'precondition_failed') {
+          // Re-run the guards on the event as it is NOW, so the caller learns
+          // the specific reason when there is one (e.g. an outsider was added).
+          const now = await getInternalEvent(providerDeps, conn, calendarId, input.eventId)
+          if (!now || now.status === 'cancelled') refuse('NOT_FOUND', 'the meeting was cancelled meanwhile')
+          assertOwned(now, actor)
+          await resolveAttendees(
+            repos,
+            actor,
+            now.attendees.map((a) => a.email),
+          )
+          refuse('CONCURRENT_MODIFICATION', 'the meeting changed while it was being moved; nothing was changed, re-read it and retry')
+        }
+        const out = patched.event ?? { ...ev, start: input.start, end: input.end }
         return meetingOut(out, timezone, out.meetUrl)
       }),
 
@@ -429,11 +463,18 @@ export function createInternalService(deps: InternalServiceDeps): InternalServic
       run('cancelMeeting', raw, cancelMeetingSchema, async (input, actor, repos) => {
         const { conn, calendarId } = await writeConnection(repos, actor)
         const ev = await getInternalEvent(providerDeps, conn, calendarId, input.eventId)
-        if (!ev) return { eventId: input.eventId, cancelled: false }
+        if (!ev) return { eventId: input.eventId, cancelled: false, notified: [] }
         assertOwned(ev, actor)
-        if (ev.status === 'cancelled') return { eventId: ev.id, cancelled: false }
+        if (ev.status === 'cancelled') return { eventId: ev.id, cancelled: false, notified: [] }
         const cancelled = await deleteInternalEvent(providerDeps, conn, calendarId, ev.id)
-        return { eventId: ev.id, cancelled }
+        // Everyone Google will send the cancellation to, INCLUDING any guest
+        // added by hand in Google (possibly external): a cancellation, never
+        // an invitation, so it is not refused, but the caller must be able
+        // to tell the user who heard about it.
+        const notified = cancelled
+          ? ev.attendees.map((a) => a.email).filter((e) => e !== actor.email.toLowerCase())
+          : []
+        return { eventId: ev.id, cancelled, notified }
       }),
 
     myBookingLinks: (raw) =>
@@ -480,6 +521,13 @@ export function createInternalService(deps: InternalServiceDeps): InternalServic
 }
 
 // ---------------------------------------------------------------------------
+
+/** Every internal invite says who asked for it; the caller cannot remove or alter this line. */
+export function withFooter(description: string | undefined, actorEmail: string): string {
+  const footer = `Created by the SwayQ assistant for ${actorEmail.toLowerCase()}.`
+  const body = (description ?? '').trim()
+  return body === '' ? footer : `${body}\n\n${footer}`
+}
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)

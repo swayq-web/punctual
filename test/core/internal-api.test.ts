@@ -47,6 +47,7 @@ interface StoredEvent {
   extendedProperties?: { private?: Record<string, string> }
   hangoutLink?: string
   htmlLink: string
+  etag?: string
 }
 
 interface Call {
@@ -87,6 +88,7 @@ function scriptedGoogle() {
       const ev: StoredEvent = {
         ...body,
         status: 'confirmed',
+        etag: '"1"',
         hangoutLink: `https://meet.google.com/${id.slice(2, 5)}-xyz`,
         htmlLink: `https://calendar.google.com/event?eid=${id}`,
       }
@@ -103,7 +105,10 @@ function scriptedGoogle() {
     if (method === 'GET') return ev ? json(200, ev) : json(404, { error: { code: 404 } })
     if (method === 'PATCH') {
       if (!ev) return json(404, { error: { code: 404 } })
+      const ifMatch = (init?.headers as Record<string, string> | undefined)?.['if-match']
+      if (ifMatch !== undefined && ifMatch !== ev.etag) return json(412, { error: { code: 412 } })
       Object.assign(ev, body)
+      ev.etag = `"${Number((ev.etag ?? '"0"').replace(/"/g, '')) + 1}"`
       return json(200, ev)
     }
     if (method === 'DELETE') {
@@ -154,7 +159,7 @@ interface Harness {
   eventTypes: EventType[]
 }
 
-function harness(opts: { serviceToken?: string | undefined; allowedDomains?: string[] } = {}): Harness {
+function harness(opts: { serviceToken?: string | undefined; allowedDomains?: string | undefined } = {}): Harness {
   const repos = createFakeRepositories()
   const google = scriptedGoogle()
   const busy = new Map<string, Interval[] | Error>()
@@ -220,7 +225,7 @@ function harness(opts: { serviceToken?: string | undefined; allowedDomains?: str
       fetch: google.fetchImpl,
     },
     serviceToken: 'serviceToken' in opts ? opts.serviceToken : TOKEN,
-    allowedDomains: opts.allowedDomains ?? [],
+    allowedDomains: 'allowedDomains' in opts ? opts.allowedDomains : 'swayq.com',
     logError: () => {},
   })
 
@@ -318,7 +323,7 @@ describe('acting user', () => {
   })
 
   it('refuses an actor outside INTERNAL_ALLOWED_DOMAINS even when they are a user', async () => {
-    const h = harness({ allowedDomains: ['swayq.com'] })
+    const h = harness()
     h.repos.seedUser({ id: 'u_out', email: 'someone@gmail.com' })
     expectError(await h.svc.myBookingLinks({ token: TOKEN, actingUserEmail: 'someone@gmail.com' }), 'UNKNOWN_ACTOR')
   })
@@ -367,7 +372,7 @@ describe('attendee guard: every attendee must be an active Punctual user', () =>
   })
 
   it('applies INTERNAL_ALLOWED_DOMAINS to attendees too', async () => {
-    const h = harness({ allowedDomains: ['swayq.com'] })
+    const h = harness()
     h.repos.seedUser({ id: 'u_gm', email: 'friend@gmail.com' })
     const res = expectError(
       await h.svc.createMeeting(createInput({ attendeeEmails: [PETER, 'friend@gmail.com'] })),
@@ -533,6 +538,7 @@ describe('createMeeting', () => {
         fetch: racing,
       },
       serviceToken: TOKEN,
+      allowedDomains: 'swayq.com',
       logError: () => {},
     })
     const res = await svc.createMeeting(createInput())
@@ -588,6 +594,7 @@ describe('createMeeting', () => {
             : new Response('{"error":"ya29.LEAKED-TOKEN internal detail"}', { status: 500 })) as typeof fetch,
       },
       serviceToken: TOKEN,
+      allowedDomains: 'swayq.com',
       logError: () => {},
     })
     const res = expectError(await svc.createMeeting(createInput()), 'PROVIDER_ERROR')
@@ -666,7 +673,7 @@ describe('ownership guard: reschedule and cancel', () => {
     seedEvent(h, PETER, 'peterevt1', { swayqInternalMeeting: '1', swayqOrganizer: PETER })
     expectError(await h.svc.rescheduleMeeting(move('peterevt1')), 'NOT_FOUND')
     const cancel = await h.svc.cancelMeeting({ token: TOKEN, actingUserEmail: JH, eventId: 'peterevt1' })
-    expect(cancel).toEqual({ ok: true, eventId: 'peterevt1', cancelled: false })
+    expect(cancel).toEqual({ ok: true, eventId: 'peterevt1', cancelled: false, notified: [] })
     expect(h.google.cal(PETER).has('peterevt1')).toBe(true)
     // Every call went to the ACTOR's calendar.
     for (const c of h.google.calls) expect(c.url.pathname).toContain(encodeURIComponent(JH))
@@ -722,10 +729,15 @@ describe('ownership guard: reschedule and cancel', () => {
     const created = await h.svc.createMeeting(createInput())
     if (!created.ok) throw new Error(created.code)
     const input = { token: TOKEN, actingUserEmail: JH, eventId: created.eventId }
-    expect(await h.svc.cancelMeeting(input)).toEqual({ ok: true, eventId: created.eventId, cancelled: true })
+    expect(await h.svc.cancelMeeting(input)).toEqual({
+      ok: true,
+      eventId: created.eventId,
+      cancelled: true,
+      notified: [PETER, EMMA],
+    })
     const del = h.google.calls.find((c) => c.method === 'DELETE')!
     expect(del.url.searchParams.get('sendUpdates')).toBe('all')
-    expect(await h.svc.cancelMeeting(input)).toEqual({ ok: true, eventId: created.eventId, cancelled: false })
+    expect(await h.svc.cancelMeeting(input)).toEqual({ ok: true, eventId: created.eventId, cancelled: false, notified: [] })
   })
 })
 

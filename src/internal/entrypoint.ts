@@ -36,12 +36,12 @@ import type {
   RescheduleMeetingInput,
 } from './contract.js'
 import { createInternalService, type InternalService } from './service.js'
-import { verifyServiceToken } from './token.js'
+import { parseAllowedDomains, verifyServiceToken } from './token.js'
 
 export interface InternalEnv extends Env {
   /** Shared secret the calling Worker passes as `token`. Unset = every call refused. */
   INTERNAL_SERVICE_TOKEN?: string
-  /** Optional comma list of email domains actor and attendees must belong to, e.g. "swayq.com". */
+  /** REQUIRED comma list of bare email domains actor and attendees must belong to, e.g. "swayq.com". Unset or malformed = every call refused. */
   INTERNAL_ALLOWED_DOMAINS?: string
 }
 
@@ -74,60 +74,66 @@ export function serviceFromEnv(env: InternalEnv): InternalService {
     ports,
     providerDeps: providerDepsFromPorts(ports),
     serviceToken: env.INTERNAL_SERVICE_TOKEN,
-    allowedDomains: (env.INTERNAL_ALLOWED_DOMAINS ?? '').split(','),
+    allowedDomains: env.INTERNAL_ALLOWED_DOMAINS,
   })
 }
 
-export class InternalApi extends WorkerEntrypoint<InternalEnv> {
-  private service(): InternalService {
-    return serviceFromEnv(this.env)
+/**
+ * The entrypoint's own gate, run BEFORE the engine is built: the token and
+ * the domain allowlist are configuration, so an unauthenticated or
+ * unconfigured call costs nothing and cannot probe engine configuration
+ * errors (buildPorts throwing would otherwise surface as INTERNAL_ERROR).
+ * The service re-checks both itself, since it is also callable directly.
+ *
+ * A module function, NOT a class member: every member of a
+ * WorkerEntrypoint, TypeScript `private` included, is callable over RPC.
+ * Only the six methods below are on the class.
+ */
+async function gatedCall<T>(
+  env: InternalEnv,
+  input: unknown,
+  fn: (s: InternalService) => Promise<InternalResult<T>>,
+): Promise<InternalResult<T>> {
+  const presented = typeof input === 'object' && input !== null ? (input as { token?: unknown }).token : undefined
+  const verdict = await verifyServiceToken(env.INTERNAL_SERVICE_TOKEN, presented)
+  if (verdict === 'not_configured' || parseAllowedDomains(env.INTERNAL_ALLOWED_DOMAINS) === null) {
+    return { ok: false, code: 'SERVICE_NOT_CONFIGURED', message: 'internal API is not configured on this deployment' }
   }
+  if (verdict !== 'ok') return { ok: false, code: 'UNAUTHORIZED', message: 'invalid service token' }
+  let svc: InternalService
+  try {
+    svc = serviceFromEnv(env)
+  } catch {
+    console.error('[punctual internal] engine misconfigured')
+    return { ok: false, code: 'INTERNAL_ERROR', message: 'internal error' }
+  }
+  return fn(svc)
+}
 
-  /**
-   * The token is checked BEFORE the engine is built, so an unauthenticated
-   * caller costs nothing and cannot probe configuration errors. buildPorts
-   * can throw on a misconfigured deployment; that must still be a typed
-   * result. The service re-checks the token itself (it is also callable
-   * directly in tests and by future embedders).
-   */
-  private async call<T>(input: unknown, fn: (s: InternalService) => Promise<InternalResult<T>>): Promise<InternalResult<T>> {
-    const presented = typeof input === 'object' && input !== null ? (input as { token?: unknown }).token : undefined
-    const verdict = await verifyServiceToken(this.env.INTERNAL_SERVICE_TOKEN, presented)
-    if (verdict === 'not_configured') {
-      return { ok: false, code: 'SERVICE_NOT_CONFIGURED', message: 'internal API is not configured on this deployment' }
-    }
-    if (verdict !== 'ok') return { ok: false, code: 'UNAUTHORIZED', message: 'invalid service token' }
-    let svc: InternalService
-    try {
-      svc = this.service()
-    } catch {
-      console.error('[punctual internal] engine misconfigured')
-      return { ok: false, code: 'INTERNAL_ERROR', message: 'internal error' }
-    }
-    return fn(svc)
-  }
+/** The RPC surface: exactly these six methods, nothing else. */
+export class InternalApi extends WorkerEntrypoint<InternalEnv> {
 
   findTime(input: FindTimeInput): Promise<InternalResult<FindTimeOutput>> {
-    return this.call(input, (s) => s.findTime(input))
+    return gatedCall(this.env, input, (s) => s.findTime(input))
   }
 
   createMeeting(input: CreateMeetingInput): Promise<InternalResult<CreateMeetingOutput>> {
-    return this.call(input, (s) => s.createMeeting(input))
+    return gatedCall(this.env, input, (s) => s.createMeeting(input))
   }
 
   listMyMeetings(input: ListMyMeetingsInput): Promise<InternalResult<ListMyMeetingsOutput>> {
-    return this.call(input, (s) => s.listMyMeetings(input))
+    return gatedCall(this.env, input, (s) => s.listMyMeetings(input))
   }
 
   rescheduleMeeting(input: RescheduleMeetingInput): Promise<InternalResult<MeetingOutput>> {
-    return this.call(input, (s) => s.rescheduleMeeting(input))
+    return gatedCall(this.env, input, (s) => s.rescheduleMeeting(input))
   }
 
   cancelMeeting(input: CancelMeetingInput): Promise<InternalResult<CancelMeetingOutput>> {
-    return this.call(input, (s) => s.cancelMeeting(input))
+    return gatedCall(this.env, input, (s) => s.cancelMeeting(input))
   }
 
   myBookingLinks(input: MyBookingLinksInput): Promise<InternalResult<MyBookingLinksOutput>> {
-    return this.call(input, (s) => s.myBookingLinks(input))
+    return gatedCall(this.env, input, (s) => s.myBookingLinks(input))
   }
 }

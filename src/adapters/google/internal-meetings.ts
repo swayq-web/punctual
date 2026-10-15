@@ -43,6 +43,8 @@ export interface InternalGoogleEvent {
   htmlLink: string | null
   meetUrl: string | null
   attendees: Array<{ email: string; responseStatus: string | null }>
+  /** For If-Match on writes. */
+  etag: string | null
   /** `extendedProperties.private`, as Google stored it on this calendar's copy. */
   marker: string | null
   organizerMarker: string | null
@@ -195,8 +197,9 @@ export async function patchInternalEventTime(
   conn: CalendarConnection,
   calendarId: string,
   eventId: string,
+  etag: string | null,
   times: { start: number; end: number; timezone: string },
-): Promise<InternalGoogleEvent | null> {
+): Promise<{ kind: 'patched'; event: InternalGoogleEvent | null } | { kind: 'precondition_failed' }> {
   const url = eventUrl(calendarId, eventId)
   // Version 1 so Google keeps the existing conference; no createRequest, so
   // the Meet link already in everyone's inbox stays valid.
@@ -204,14 +207,18 @@ export async function patchInternalEventTime(
   url.searchParams.set('sendUpdates', 'all')
   const res = await providerFetch(deps, conn, url.toString(), {
     method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(etag ? { 'if-match': etag } : {}) },
     body: JSON.stringify({
       start: { dateTime: new Date(times.start).toISOString(), timeZone: times.timezone },
       end: { dateTime: new Date(times.end).toISOString(), timeZone: times.timezone },
     }),
   })
+  if (res.status === 412) {
+    await res.text().catch(() => '')
+    return { kind: 'precondition_failed' }
+  }
   const json = await readJson<unknown>(conn, res, 'events.patch')
-  return parseInternalEvent(json)
+  return { kind: 'patched', event: parseInternalEvent(json) }
 }
 
 /** true when deleted now, false when it was already gone (404/410). */
@@ -265,6 +272,7 @@ export function parseInternalEvent(json: unknown): InternalGoogleEvent | null {
     start,
     end,
     htmlLink: typeof json['htmlLink'] === 'string' ? json['htmlLink'] : null,
+    etag: typeof json['etag'] === 'string' ? json['etag'] : null,
     meetUrl: googleConferenceUrl(json)?.conferenceUrl ?? null,
     attendees,
     marker,
