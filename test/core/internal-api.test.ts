@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createInternalService, type InternalService } from '../../src/internal/service.js'
 import { createEnvOAuthCredentials, CalendarApiError } from '../../src/adapters/oauth.js'
+import { stableEventIds } from '../../src/adapters/calendar-ids.js'
+import { bytesEqual, parseAllowedDomains, verifyServiceToken } from '../../src/internal/token.js'
 import { createFakeRepositories, fakeConfig, type FakeRepositories } from '../../src/testing/fakes.js'
 import type { CalendarProvider } from '../../src/ports.js'
 import type { CalendarConnection, EventType, Interval, OAuthTokens, WeeklySchedule } from '../../src/core/domain/types.js'
@@ -60,6 +62,8 @@ function scriptedGoogle() {
   /** calendarId -> eventId -> event */
   const calendars = new Map<string, Map<string, StoredEvent>>()
   const calls: Call[] = []
+  /** Test hooks: `beforePatch` runs on the stored event before If-Match is checked (a concurrent edit). */
+  const hooks: { beforePatch?: (ev: StoredEvent) => void } = {}
   const cal = (id: string) => {
     let c = calendars.get(id)
     if (!c) calendars.set(id, (c = new Map()))
@@ -105,6 +109,7 @@ function scriptedGoogle() {
     if (method === 'GET') return ev ? json(200, ev) : json(404, { error: { code: 404 } })
     if (method === 'PATCH') {
       if (!ev) return json(404, { error: { code: 404 } })
+      hooks.beforePatch?.(ev)
       const ifMatch = (init?.headers as Record<string, string> | undefined)?.['if-match']
       if (ifMatch !== undefined && ifMatch !== ev.etag) return json(412, { error: { code: 412 } })
       Object.assign(ev, body)
@@ -119,7 +124,7 @@ function scriptedGoogle() {
     return json(501, { error: 'no route' })
   }) as typeof globalThis.fetch
 
-  return { fetchImpl, calls, calendars, cal }
+  return { fetchImpl, calls, calendars, cal, hooks }
 }
 
 // ---------------------------------------------------------------------------
@@ -763,5 +768,221 @@ describe('myBookingLinks', () => {
       ok: true,
       links: [{ title: 'Intro call', slug: 'intro', durationMinutes: 30, url: 'https://cal.swayq.com/jh/intro' }],
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Judge round 1 (PR #3): the gaps a mutant could hide in.
+// ---------------------------------------------------------------------------
+
+function allMethods(svc: InternalService) {
+  return Promise.all([
+    svc.findTime(findInput()),
+    svc.createMeeting(createInput()),
+    svc.listMyMeetings({ token: TOKEN, actingUserEmail: JH, from: '2026-10-19T00:00:00Z', to: '2026-10-26T00:00:00Z' }),
+    svc.rescheduleMeeting({ token: TOKEN, actingUserEmail: JH, eventId: 'abcde', start: '2026-10-20T10:00:00Z', end: '2026-10-20T11:00:00Z' }),
+    svc.cancelMeeting({ token: TOKEN, actingUserEmail: JH, eventId: 'abcde' }),
+    svc.myBookingLinks({ token: TOKEN, actingUserEmail: JH }),
+  ])
+}
+
+describe('INTERNAL_ALLOWED_DOMAINS is required', () => {
+  for (const raw of [undefined, '', '   ', '@swayq.com', 'swayq .com', 'swayq.com, @x.com', 'swayq.com,', '*.swayq.com', 'localhost', 'jh@swayq.com']) {
+    it(`refuses every method when it is ${JSON.stringify(raw)}`, async () => {
+      const h = harness({ allowedDomains: raw })
+      for (const res of await allMethods(h.svc)) expectError(res, 'SERVICE_NOT_CONFIGURED')
+      expect(h.google.calls).toHaveLength(0)
+      expect(h.getBusyCalls).toHaveLength(0)
+    })
+  }
+
+  it('parses a valid list, normalizing case and spacing', () => {
+    expect(parseAllowedDomains(' swayq.com , SwayQ.dk')).toEqual(['swayq.com', 'swayq.dk'])
+  })
+
+  it('refuses friend@gmail.com even with a Punctual account and a connected calendar', async () => {
+    const h = harness()
+    h.repos.seedUser({ id: 'u_friend', email: 'friend@gmail.com' })
+    void h.repos.connections.create(conn('u_friend', 'friend@gmail.com'))
+    const asAttendee = expectError(
+      await h.svc.createMeeting(createInput({ attendeeEmails: [PETER, 'friend@gmail.com'] })),
+      'EXTERNAL_ATTENDEE',
+    )
+    expect(asAttendee.externalEmails).toEqual(['friend@gmail.com'])
+    expectError(await h.svc.findTime(findInput({ attendeeEmails: ['friend@gmail.com'] })), 'EXTERNAL_ATTENDEE')
+    expectError(await h.svc.findTime(findInput({ actingUserEmail: 'friend@gmail.com', attendeeEmails: [] })), 'UNKNOWN_ACTOR')
+    expect(h.google.calls).toHaveLength(0)
+    expect(h.getBusyCalls).toHaveLength(0)
+  })
+
+  it('matches the domain exactly: a lookalike subdomain is external', async () => {
+    const h = harness()
+    h.repos.seedUser({ id: 'u_sub', email: 'x@evil.swayq.com.attacker.io' })
+    expectError(
+      await h.svc.createMeeting(createInput({ attendeeEmails: ['x@evil.swayq.com.attacker.io'] })),
+      'EXTERNAL_ATTENDEE',
+    )
+  })
+})
+
+describe('service token comparison covers every byte', () => {
+  it('bytesEqual: arrays differing only in their LAST byte are unequal', () => {
+    const a = new Uint8Array(32).fill(7)
+    const b = a.slice()
+    b[31] = 8
+    expect(bytesEqual(a, a.slice())).toBe(true)
+    expect(bytesEqual(a, b)).toBe(false)
+    expect(bytesEqual(a, a.slice(0, 31))).toBe(false)
+  })
+
+  it('refuses a same-length wrong token', async () => {
+    const h = harness()
+    const wrong = 'x'.repeat(TOKEN.length)
+    expectError(await h.svc.myBookingLinks({ token: wrong, actingUserEmail: JH }), 'UNAUTHORIZED')
+  })
+
+  it('refuses a token differing only in its last character, even when the digests share their first byte', async () => {
+    // Find a (secret, presented) pair that differ only in the last character
+    // AND whose SHA-256 digests agree on byte 0, so a comparison that stops
+    // early cannot pass this test by luck.
+    const sha = async (v: string) => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(v)))
+    let pair: [string, string] | null = null
+    for (let n = 0; n < 200 && !pair; n++) {
+      const secret = `secret-${n}-A`
+      const first = (await sha(secret))[0]
+      for (let c = 0x21; c < 0x7f && !pair; c++) {
+        const presented = `secret-${n}-${String.fromCharCode(c)}`
+        if (presented !== secret && (await sha(presented))[0] === first) pair = [secret, presented]
+      }
+    }
+    expect(pair).not.toBeNull()
+    const [secret, presented] = pair!
+    expect(presented.slice(0, -1)).toBe(secret.slice(0, -1))
+    expect(await verifyServiceToken(secret, presented)).toBe('unauthorized')
+    expect(await verifyServiceToken(secret, secret)).toBe('ok')
+    const h = harness({ serviceToken: secret })
+    expectError(await h.svc.myBookingLinks({ token: presented, actingUserEmail: JH }), 'UNAUTHORIZED')
+  })
+})
+
+describe('listMyMeetings organizer filter', () => {
+  it('does not list a marked meeting on my calendar whose swayqOrganizer is someone else', async () => {
+    const h = harness()
+    h.google.cal(JH).set('foreignmark1', {
+      id: 'foreignmark1',
+      status: 'confirmed',
+      summary: 'Planted',
+      start: { dateTime: '2026-10-21T08:00:00Z' },
+      end: { dateTime: '2026-10-21T09:00:00Z' },
+      attendees: [{ email: JH }],
+      extendedProperties: { private: { swayqInternalMeeting: '1', swayqOrganizer: PETER } },
+      htmlLink: 'x',
+    })
+    const res = await h.svc.listMyMeetings({ token: TOKEN, actingUserEmail: JH, from: '2026-10-19T00:00:00Z', to: '2026-10-26T00:00:00Z' })
+    if (!res.ok) throw new Error(res.code)
+    expect(res.meetings).toEqual([])
+  })
+})
+
+describe('idempotency keys are scoped to the actor', () => {
+  it('two actors using the same key get distinct events', async () => {
+    const h = harness()
+    const a = await h.svc.createMeeting(createInput({ idempotencyKey: 'shared-key-123' }))
+    const b = await h.svc.createMeeting(
+      createInput({ actingUserEmail: PETER, attendeeEmails: [EMMA], idempotencyKey: 'shared-key-123' }),
+    )
+    if (!a.ok || !b.ok) throw new Error('create failed')
+    expect(a.eventId).not.toBe(b.eventId)
+    expect(b.created).toBe(true)
+  })
+
+  it('refuses to replay an event at the derived id whose organizer is someone else', async () => {
+    const h = harness()
+    const { googleEventId } = await stableEventIds('swayq-internal:u_jh:planted-key-1')
+    h.google.cal(JH).set(googleEventId, {
+      id: googleEventId,
+      status: 'confirmed',
+      summary: 'Planted',
+      start: { dateTime: '2026-10-20T08:00:00Z' },
+      end: { dateTime: '2026-10-20T08:30:00Z' },
+      attendees: [{ email: JH }, { email: PETER }],
+      extendedProperties: { private: { swayqInternalMeeting: '1', swayqOrganizer: PETER } },
+      htmlLink: 'x',
+    })
+    expectError(await h.svc.createMeeting(createInput({ idempotencyKey: 'planted-key-1' })), 'IDEMPOTENCY_CONFLICT')
+  })
+})
+
+describe('reschedule: declined attendees and concurrent edits', () => {
+  const to = (eventId: string) => ({
+    token: TOKEN,
+    actingUserEmail: JH,
+    eventId,
+    start: '2026-10-20T10:15:00+02:00',
+    end: '2026-10-20T10:45:00+02:00',
+  })
+
+  it("does not mask a declined attendee's other commitment in the old slot", async () => {
+    const h = harness()
+    const created = await h.svc.createMeeting(createInput())
+    if (!created.ok) throw new Error(created.code)
+    const ev = h.google.cal(JH).get(created.eventId)!
+    ev.attendees = ev.attendees.map((a) => (a.email === PETER ? { ...a, responseStatus: 'declined' } : a))
+    // Everyone is busy 08:00-08:30Z: JH and Emma because of THIS meeting,
+    // Peter (who declined it) because of something else.
+    for (const u of ['u_jh', 'u_peter', 'u_emma']) {
+      h.busy.set(u, [{ start: at('2026-10-20T08:00:00Z'), end: at('2026-10-20T08:30:00Z') }])
+    }
+    const res = expectError(await h.svc.rescheduleMeeting(to(created.eventId)), 'SLOT_BUSY')
+    expect(res.busyEmails).toEqual([PETER])
+  })
+
+  it('sends If-Match, and a concurrent edit adding an outsider is refused with EXTERNAL_ATTENDEE', async () => {
+    const h = harness()
+    const created = await h.svc.createMeeting(createInput())
+    if (!created.ok) throw new Error(created.code)
+    h.google.hooks.beforePatch = (ev) => {
+      ev.attendees.push({ email: 'client@brand.dk' })
+      ev.etag = '"99"'
+    }
+    const res = expectError(await h.svc.rescheduleMeeting(to(created.eventId)), 'EXTERNAL_ATTENDEE')
+    expect(res.externalEmails).toEqual(['client@brand.dk'])
+    const patch = h.google.calls.find((c) => c.method === 'PATCH')!
+    expect(patch).toBeDefined()
+    // Nothing moved.
+    expect(h.google.cal(JH).get(created.eventId)!.start.dateTime).toBe('2026-10-20T08:00:00.000Z')
+  })
+
+  it('a concurrent internal edit returns CONCURRENT_MODIFICATION and moves nothing', async () => {
+    const h = harness()
+    const created = await h.svc.createMeeting(createInput())
+    if (!created.ok) throw new Error(created.code)
+    h.google.hooks.beforePatch = (ev) => {
+      ev.summary = 'Renamed meanwhile'
+      ev.etag = '"99"'
+    }
+    expectError(await h.svc.rescheduleMeeting(to(created.eventId)), 'CONCURRENT_MODIFICATION')
+    expect(h.google.cal(JH).get(created.eventId)!.start.dateTime).toBe('2026-10-20T08:00:00.000Z')
+  })
+})
+
+describe('cancel reports who was notified; create appends the footer', () => {
+  it('lists every notified address, including a hand-added external guest', async () => {
+    const h = harness()
+    const created = await h.svc.createMeeting(createInput())
+    if (!created.ok) throw new Error(created.code)
+    h.google.cal(JH).get(created.eventId)!.attendees.push({ email: 'client@brand.dk' })
+    const res = await h.svc.cancelMeeting({ token: TOKEN, actingUserEmail: JH, eventId: created.eventId })
+    expect(res).toEqual({ ok: true, eventId: created.eventId, cancelled: true, notified: [PETER, EMMA, 'client@brand.dk'] })
+  })
+
+  it('appends the fixed footer and caps the description at 2000 chars', async () => {
+    const h = harness()
+    await h.svc.createMeeting(createInput())
+    const insert = h.google.calls.find((c) => c.method === 'POST')!
+    expect((insert.body as StoredEvent).description).toBe(
+      'Agenda in the doc\n\nCreated by the SwayQ assistant for jh@swayq.com.',
+    )
+    expectError(await h.svc.createMeeting(createInput({ description: 'a'.repeat(2001) })), 'INVALID_INPUT')
   })
 })
