@@ -1,7 +1,7 @@
 /**
  * The guest-facing surface of the SwayQ deployment, through the real router
  * and a real D1: language (en/da), the SwayQ skin, manage-page hardening,
- * Turnstile, the per-guest-email limit, the colleagues field, and the
+ * Turnstile, and the
  * upstream surfaces that are switched off.
  *
  * The coordinator is a recording fake: this file is about what the guest
@@ -225,11 +225,11 @@ describe('language', () => {
     expect(html).toContain('<meta name="color-scheme" content="light">')
   })
 
-  it('the confirm page is Danish, offers the colleagues field and names the timezone', async () => {
+  it('the confirm page is Danish and names the timezone', async () => {
     const res = await get(`/grace/intro/confirm?start=${START}&tz=Europe%2FCopenhagen`, { 'accept-language': 'da' })
     const html = await res.text()
     expect(html).toContain('Bekræft din booking')
-    expect(html).toContain('Tilføj kolleger')
+    expect(html).not.toContain('kolleger')
     expect(html).toContain('Du modtager en kalenderinvitation fra Google.')
     expect(html).toMatch(/Europe\/Copenhagen \(GMT\+[12]\)/)
     expect(html).not.toContain('challenges.cloudflare.com')
@@ -250,13 +250,12 @@ describe('language', () => {
 
 // ---------------------------------------------------------------------------
 describe('booking POST', () => {
-  it('passes the locale and the colleagues through, and answers in Danish', async () => {
+  it('passes the locale through, and answers in Danish', async () => {
     attempts.length = 0
     const res = await post(
       `/grace/intro/confirm`,
       bookingFields('anna@example.com', {
         lang: 'da',
-        colleagues: 'Bo@Example.com; bo@example.com, cleo@example.com anna@example.com',
       }),
     )
     expect(res.status).toBe(200)
@@ -265,32 +264,10 @@ describe('booking POST', () => {
     expect(html).toContain('Flyt eller aflys')
     expect(attempts).toHaveLength(1)
     expect(attempts[0]!.guestLocale).toBe('da')
-    // De-duplicated, lower-cased, and the booker is not their own colleague.
-    expect(attempts[0]!.answers['colleagues']).toBe('bo@example.com, cleo@example.com')
     // The page links to a credential: never cached, never indexed, no referrer.
     expect(res.headers.get('cache-control')).toBe('no-store')
     expect(res.headers.get('referrer-policy')).toBe('no-referrer')
     expect(res.headers.get('x-robots-tag')).toContain('noindex')
-  })
-
-  it('refuses a fourth colleague and an invalid one, in the guest language, without booking', async () => {
-    attempts.length = 0
-    const tooMany = await post(
-      `/grace/intro/confirm`,
-      bookingFields('too-many@example.com', { lang: 'da', colleagues: 'a@x.dk, b@x.dk, c@x.dk, d@x.dk' }),
-    )
-    expect(tooMany.status).toBe(400)
-    expect(await tooMany.text()).toContain('Du kan tilføje op til 3 kolleger')
-
-    const invalid = await post(
-      `/grace/intro/confirm`,
-      bookingFields('invalid@example.com', { colleagues: 'not-an-email' }),
-    )
-    expect(invalid.status).toBe(400)
-    const html = await invalid.text()
-    expect(html).toContain('not-an-email is not a valid email address')
-    expect(html).toContain('value="not-an-email"') // what they typed is kept
-    expect(attempts).toHaveLength(0)
   })
 
   it('validation errors are Danish when the guest is', async () => {
@@ -301,25 +278,6 @@ describe('booking POST', () => {
     expect(html).toContain('Skriv en gyldig e-mailadresse')
   })
 
-  it('allows 3 attempts per guest email per host per day, then refuses with a friendly message', async () => {
-    attempts.length = 0
-    const email = 'limit@example.com'
-    for (let i = 0; i < 3; i++) {
-      const ok = await post(`/grace/intro/confirm`, bookingFields(email))
-      expect(ok.status).toBe(200)
-    }
-    const fourth = await post(`/grace/intro/confirm`, bookingFields(email.toUpperCase(), { lang: 'da' }))
-    expect(fourth.status).toBe(429)
-    expect(await fourth.text()).toContain('Daglig grænse nået')
-    expect(attempts).toHaveLength(3)
-    expect(fourth.headers.get('retry-after')).not.toBeNull()
-    const keys = limiter.calls.filter((c) => c.scope === 'booking:guest-host' && c.identifier.includes('limit@'))
-    expect(keys.every((c) => c.limit === 3 && c.windowSeconds === 86_400)).toBe(true)
-    // Case never buys a second bucket.
-    expect(new Set(keys.map((c) => c.identifier)).size).toBe(1)
-    // Another guest, same host, is unaffected.
-    expect((await post(`/grace/intro/confirm`, bookingFields('other@example.com'))).status).toBe(200)
-  })
 })
 
 // ---------------------------------------------------------------------------
@@ -463,11 +421,43 @@ describe('surfaces SwayQ switches off', () => {
     expect(res.status).toBe(404)
   })
 
+  it.each([
+    ['GET', '/dashboard/api%2Dkeys'],
+    ['GET', '/auth/%6Dicrosoft/start?purpose=calendar'],
+    ['GET', `/%61vatars/${'a'.repeat(64)}-thumb.webp`],
+    ['GET', '/dashboard/%69nsights'],
+    ['POST', '/dashboard/settings/%61vatar'],
+  ])('%s %s: percent-encoding does not get around the switch', async (method, path) => {
+    const res = await Promise.resolve(app.fetch(new Request(`${BASE}${path}`, { method })))
+    expect(res.status).toBe(404)
+  })
+
+  it('a Telegram channel posted to an encoded endpoint is still refused', async () => {
+    const res = await post('/dashboard/notificat%69ons', { kind: 'telegram', bot_token: 'x', chat_id: '1' })
+    expect(res.status).toBe(404)
+  })
+
   it('a Telegram channel cannot be created; the same endpoint still serves Slack (auth decides, not a 404)', async () => {
     const telegram = await post('/dashboard/notifications', { kind: 'telegram', bot_token: 'x', chat_id: '1' })
     expect(telegram.status).toBe(404)
     const slack = await post('/dashboard/notifications', { kind: 'slack' })
     expect(slack.status).not.toBe(404)
+  })
+
+  it('team scheduling is blocked on the server, not just hidden: teams, team-owned event types in the dashboard and the API', async () => {
+    expect((await get('/dashboard/teams')).status).toBe(404)
+    expect((await post('/dashboard/teams', { name: 'Crew' })).status).toBe(404)
+    expect((await post('/dashboard/teams/t1/members', { email: 'a@b.c' })).status).toBe(404)
+    expect((await post('/dashboard/event-types', { title: 'X', owner: 'team_1', schedulingType: 'collective' })).status).toBe(404)
+    expect((await post('/dashboard/event-types/et_1', { title: 'X', owner: 'team_1' })).status).toBe(404)
+    const json = (method: string, path: string, body: unknown) =>
+      Promise.resolve(
+        app.fetch(new Request(`${BASE}${path}`, { method, body: JSON.stringify(body), headers: { 'content-type': 'application/json' } })),
+      )
+    expect((await json('POST', '/api/v1/event-types', { title: 'X', ownerTeamId: 'team_1' })).status).toBe(404)
+    // A personal event type is not caught by the switch (auth decides: no key, so 401 and not 404).
+    expect((await json('POST', '/api/v1/event-types', { title: 'X', ownerTeamId: null })).status).not.toBe(404)
+    expect((await post('/dashboard/event-types', { title: 'X', owner: '' })).status).not.toBe(404)
   })
 
   it('the dashboard does not offer the switched-off entry points', async () => {

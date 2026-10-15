@@ -8,20 +8,52 @@
 
 import type { Booking } from './types.js'
 
-/** At most this many booking attempts per guest email per host per day (enforced by the rate limiter in the confirm route). */
+/** At most this many bookings per guest email per host per rolling day. */
 export const GUEST_EMAIL_DAILY_LIMIT = 3
-export const GUEST_EMAIL_WINDOW_SECONDS = 24 * 60 * 60
+export const GUEST_EMAIL_WINDOW_MS = 24 * 60 * 60 * 1000
 
-/** The limiter key: one bucket per (host, normalised guest email). Case and surrounding space never buy a second bucket. */
-export function guestLimitKey(hostUserId: string, guestEmail: string): string {
-  return `${hostUserId}:${guestEmail.trim().toLowerCase()}`
+/**
+ * One address, one identity: case, surrounding space and a `+tag` in the local
+ * part never buy a second allowance (`Anna+1@x.dk` is `anna@x.dk`).
+ */
+export function normalizeGuestEmail(email: string): string {
+  const e = email.trim().toLowerCase()
+  const at = e.lastIndexOf('@')
+  if (at < 1) return e
+  const local = e.slice(0, at)
+  const plus = local.indexOf('+')
+  return `${plus > 0 ? local.slice(0, plus) : local}${e.slice(at)}`
+}
+
+/**
+ * Bookings this guest MADE with this host in the last day (by creation time,
+ * not start time). Confirmed bookings only, because that is what the host's
+ * list holds, and a replacement created by a reschedule is not a new booking.
+ * Counted from the bookings that actually exist, so an attempt that failed
+ * (slot taken, calendar down) never uses up the guest's allowance.
+ */
+export function countRecentGuestBookings(
+  candidates: readonly Booking[],
+  guestEmail: string,
+  now: number,
+  windowMs: number = GUEST_EMAIL_WINDOW_MS,
+): number {
+  const email = normalizeGuestEmail(guestEmail)
+  const seen = new Set<string>()
+  for (const b of candidates) {
+    if (seen.has(b.id)) continue
+    if (b.status !== 'confirmed' || b.rescheduleOf) continue
+    if (b.createdAt < now - windowMs) continue
+    if (normalizeGuestEmail(b.guestEmail) !== email) continue
+    seen.add(b.id)
+  }
+  return seen.size
 }
 
 /**
  * The start of the earliest OTHER confirmed upcoming booking this guest has
  * with this host, or null. `candidates` is the host's upcoming bookings (any
  * guest); `current` is the booking just made and is never its own duplicate.
- * A rescheduled-away predecessor is excluded by status.
  */
 export function findOtherUpcomingGuestBooking(
   candidates: readonly Booking[],
@@ -39,37 +71,3 @@ export function findOtherUpcomingGuestBooking(
   }
   return earliest
 }
-
-const EMAIL_SHAPE = /^[^\s@,;]+@[^\s@,;.]+(\.[^\s@,;.]+)+$/
-
-export type ColleaguesResult =
-  | { ok: true; emails: string[] }
-  | { ok: false; error: 'invalid'; email: string }
-  | { ok: false; error: 'too_many' }
-
-export const MAX_COLLEAGUES = 3
-
-/**
- * Parse the "add colleagues" field: comma, semicolon or whitespace separated,
- * validated, lower-cased, de-duplicated, and never including the booker or
- * anyone already counted. More than three DISTINCT addresses is an error
- * rather than a silent truncation: the guest should know who was left off.
- */
-export function parseColleagues(raw: string, guestEmail: string): ColleaguesResult {
-  const guest = guestEmail.trim().toLowerCase()
-  const seen = new Set<string>([guest])
-  const emails: string[] = []
-  for (const part of raw.split(/[\s,;]+/)) {
-    const email = part.trim().toLowerCase()
-    if (email === '') continue
-    if (email.length > 254 || !EMAIL_SHAPE.test(email)) return { ok: false, error: 'invalid', email: part.trim() }
-    if (seen.has(email)) continue
-    seen.add(email)
-    emails.push(email)
-  }
-  if (emails.length > MAX_COLLEAGUES) return { ok: false, error: 'too_many' }
-  return { ok: true, emails }
-}
-
-/** The declared-answer key the colleagues travel under until the domain model has real extra attendees. */
-export const COLLEAGUES_ANSWER_KEY = 'colleagues'

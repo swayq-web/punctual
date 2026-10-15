@@ -200,6 +200,7 @@ export function createCoordinator(deps: CoordinatorDeps): HostCoordinator {
           guestName: request.guestName,
           guestEmail: request.guestEmail,
           guestTimezone: request.guestTimezone,
+          guestLocale: request.guestLocale ?? null,
           answers: request.answers,
           now,
           bookingId,

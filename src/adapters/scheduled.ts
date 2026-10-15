@@ -95,6 +95,7 @@ async function sendReminders(ports: EnginePorts, now: number): Promise<void> {
         when: w.label,
         brandName: ports.config.brandName,
         supportEmail: ports.config.supportEmail,
+        ...(booking.guestLocale === 'da' || booking.guestLocale === 'en' ? { locale: booking.guestLocale } : {}),
       })
 
       await ports.queue.send({
@@ -105,6 +106,7 @@ async function sendReminders(ports: EnginePorts, now: number): Promise<void> {
           subject: mail.subject,
           html: mail.html,
           text: mail.text,
+          ...(host.email ? { replyTo: host.email } : {}),
         },
       })
     }

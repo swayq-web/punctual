@@ -50,8 +50,6 @@ export const da: Record<MessageKey, string> = {
   'confirm.email': 'E-mail',
   'confirm.optional': '(valgfrit)',
   'confirm.agenda': 'Hvad vil du gerne tale om?',
-  'confirm.colleagues': 'Tilføj kolleger',
-  'confirm.colleaguesHint': 'Op til 3 e-mailadresser, adskilt af komma. De bliver tilføjet til bookingen.',
   'confirm.submit': 'Bekræft booking',
   'confirm.back': 'Tilbage',
   'confirm.inviteNote': 'Du modtager en kalenderinvitation fra Google.',
@@ -64,8 +62,6 @@ export const da: Record<MessageKey, string> = {
   'err.required': 'Feltet skal udfyldes',
   'err.option': 'Vælg en af de viste muligheder',
   'err.tooLong': 'For langt (højst 2000 tegn)',
-  'err.colleagueInvalid': '{email} er ikke en gyldig e-mailadresse',
-  'err.colleaguesMax': 'Du kan tilføje op til 3 kolleger',
   'err.captcha': 'Vi kunne ikke bekræfte, at du er et menneske. Prøv igen.',
   'err.guestLimit.title': 'Daglig grænse nået',
   'err.guestLimit.body':
@@ -73,6 +69,8 @@ export const da: Record<MessageKey, string> = {
   'err.tooManyBookings.title': 'For mange bookinger',
   'err.tooManyRequests.title': 'For mange forespørgsler',
   'err.waitAndRetry': 'Vent lidt, og prøv igen.',
+  'err.broken.title': 'Noget gik galt',
+  'err.broken.body': 'Genindlæs siden.',
   'err.notFound.title': 'Siden findes ikke',
   'err.notFound.body': 'Den bookingside findes ikke.',
   'err.couldNotBook.title': 'Bookingen kunne ikke gennemføres',
@@ -81,9 +79,10 @@ export const da: Record<MessageKey, string> = {
   'taken.title': 'Den tid blev lige taget',
   'taken.body': 'Nogen nåede at booke den, mens du udfyldte formularen. Her er de andre tider samme dag.',
   'taken.cta': 'Se ledige tider',
-  'bookingDrifted.title': 'Tiden er netop ændret',
-  'bookingDrifted.body': 'Værtens kalender ændrede sig, mens du booker, så tiden er ikke længere ledig. Vælg en anden tid.',
-  'calendarUnavailable.title': 'Booking er midlertidigt utilgængelig',
+  'bookingDrifted.title': 'Mødet er ændret',
+  'bookingDrifted.body':
+    'Mødet er ændret i værtens kalender, så det kan ikke længere flyttes eller aflyses her. Kontakt værten direkte.',
+  'calendarUnavailable.title': 'Midlertidigt utilgængelig',
   'calendarUnavailable.body':
     'Vi kan ikke tjekke værtens kalender lige nu, så der vises ingen tider, og der er ikke booket noget. Prøv igen senere, eller kontakt værten.',
 

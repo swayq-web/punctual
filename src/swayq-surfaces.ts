@@ -60,6 +60,7 @@ export function blockedSurface(pathname: string, flags: SurfaceFlags = SWAYQ_SUR
   if (!flags.insights && under(pathname, '/dashboard/insights')) return 'insights'
   if (!flags.microsoft && under(pathname, '/auth/microsoft')) return 'microsoft'
   if (!flags.apiKeys && under(pathname, '/dashboard/api-keys')) return 'apiKeys'
+  if (!flags.teamScheduling && under(pathname, '/dashboard/teams')) return 'teamScheduling'
   // `mcp` is not path-gated: the router simply does not mount the sub-app
   // (and so `/mcp/...` falls through to the ordinary 404 / booking routes).
   return null
@@ -70,7 +71,21 @@ export function isChannelCreatePath(pathname: string): boolean {
   return pathname === '/dashboard/notifications' || /^\/dashboard\/teams\/[^/]+\/notifications$/.test(pathname)
 }
 
-/** True when a channel-create form asks for a switched-off kind. */
+const DASHBOARD_EVENT_TYPE_WRITE = /^\/dashboard\/event-types(\/[^/]+)?$/
+const API_EVENT_TYPE_WRITE = /^\/api\/v1\/event-types(\/[^/]+)?$/
+
+/** Paths whose switch depends on what the request body says (the router reads a clone of it). */
+export function needsBodyCheck(pathname: string): boolean {
+  return (
+    isChannelCreatePath(pathname) || DASHBOARD_EVENT_TYPE_WRITE.test(pathname) || API_EVENT_TYPE_WRITE.test(pathname)
+  )
+}
+
+/**
+ * True when a form or JSON body asks for a switched-off thing at a shared
+ * endpoint: a Telegram channel, or a team-owned event type (round robin and
+ * collective) from the dashboard form (`owner`) or the API (`ownerTeamId`).
+ */
 export function blockedByForm(
   pathname: string,
   form: { get(name: string): unknown },
@@ -78,6 +93,13 @@ export function blockedByForm(
 ): SurfaceName | null {
   if (!flags.telegram && isChannelCreatePath(pathname) && String(form.get('kind') ?? '') === 'telegram') {
     return 'telegram'
+  }
+  if (!flags.teamScheduling) {
+    if (DASHBOARD_EVENT_TYPE_WRITE.test(pathname) && String(form.get('owner') ?? '').trim() !== '') return 'teamScheduling'
+    if (API_EVENT_TYPE_WRITE.test(pathname)) {
+      const owner = form.get('ownerTeamId')
+      if (typeof owner === 'string' ? owner.trim() !== '' : owner != null && owner !== false) return 'teamScheduling'
+    }
   }
   return null
 }

@@ -56,13 +56,11 @@ import {
   type Locale,
   type MessageKey,
 } from '../core/i18n/index.js'
-import { SWAYQ_SURFACES, blockedByForm, blockedSurface } from '../swayq-surfaces.js'
+import { SWAYQ_SURFACES, blockedByForm, blockedSurface, needsBodyCheck } from '../swayq-surfaces.js'
 import {
-  COLLEAGUES_ANSWER_KEY,
   GUEST_EMAIL_DAILY_LIMIT,
-  GUEST_EMAIL_WINDOW_SECONDS,
-  guestLimitKey,
-  parseColleagues,
+  GUEST_EMAIL_WINDOW_MS,
+  countRecentGuestBookings,
 } from '../core/domain/guest-history.js'
 import {
   TURNSTILE_FORM_FIELD,
@@ -113,12 +111,26 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
   // surface answers like any unknown URL. One middleware, first in line, so
   // no route below can be reached around it. `/mcp` is simply not mounted.
   app.use('*', async (c, next) => {
-    const path = new URL(c.req.url).pathname
-    if (blockedSurface(path)) return notFound(c, ports)
-    if (c.req.method === 'POST' && /\/notifications$/.test(path)) {
-      // Channel creation shares one URL across kinds; read the kind from a clone so the real handler still gets an unread body.
-      const form = await c.req.raw.clone().formData().catch(() => null)
-      if (form && blockedByForm(path, form)) return notFound(c, ports)
+    // Hono routes on the DECODED path, so the gate must too: `/auth/%6Dicrosoft`
+    // reaches the same handler as `/auth/microsoft`. Check the router's own
+    // view (`c.req.path`) and a full decode, so neither spelling slips past.
+    const path = c.req.path
+    let decoded = path
+    try {
+      decoded = decodeURIComponent(path)
+    } catch {
+      decoded = path
+    }
+    if (blockedSurface(path) || blockedSurface(decoded)) return notFound(c, ports)
+    if ((c.req.method === 'POST' || c.req.method === 'PATCH') && needsBodyCheck(decoded)) {
+      // Some switches live in the body (a Telegram channel, a team-owned
+      // event type). Read a clone, so the real handler still gets an unread body.
+      const raw = c.req.raw.clone()
+      const isJson = (raw.headers.get('content-type') ?? '').includes('json')
+      const body = isJson
+        ? await raw.json().then((j: unknown) => ({ get: (k: string) => (j as Record<string, unknown> | null)?.[k] })).catch(() => null)
+        : await raw.formData().catch(() => null)
+      if (body && blockedByForm(decoded, body)) return notFound(c, ports)
     }
     await next()
   })
@@ -509,7 +521,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       return `${hostsRow(data)}<div class="pu-grid">${monthGrid(data)}${slotList(data)}</div>`
     }, shellFoot(true, embed, displayCompany(headerData), { locale: lang.locale, brandName: ports.config.brandName }), {
       headers: guestHeaders(lang, c),
-    })
+    }, { title: t(lang.locale, 'err.broken.title'), body: t(lang.locale, 'err.broken.body') })
   })
 
   // -------------------------------------------------------------------------
@@ -640,18 +652,6 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
     else if (name.length > 200) errors['name'] = t(lang.locale, 'err.nameLong')
     if (!isValidEmail(email)) errors['email'] = t(lang.locale, 'err.email')
 
-    // Optional extra attendees. The domain model has no attendee list yet, so
-    // they are validated here and travel as the `colleagues` declared answer
-    // (comma separated, lower-cased, de-duplicated); see the PR's integration flags.
-    const colleaguesRaw = String(form.get('colleagues') ?? '')
-    const colleagues = parseColleagues(colleaguesRaw, email)
-    if (!colleagues.ok) {
-      errors['x_colleagues'] =
-        colleagues.error === 'too_many'
-          ? t(lang.locale, 'err.colleaguesMax')
-          : t(lang.locale, 'err.colleagueInvalid', { email: colleagues.email })
-    }
-
     // Verified only once the form is otherwise valid: a typo should not cost a siteverify call, and the
     // challenge is single use, so a re-rendered form brings a fresh widget.
     if (Object.keys(errors).length === 0) {
@@ -674,7 +674,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
           // empty and the guest's typed text looks lost on the error page.
           confirmForm(data, start, {
             errors,
-            values: { name, email, ...declared, x_colleagues: colleaguesRaw },
+            values: { name, email, ...declared },
             holdId,
           }) +
           shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
@@ -683,32 +683,30 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       )
     }
 
-    // At most GUEST_EMAIL_DAILY_LIMIT attempts per guest email per host per
-    // day. The limiter is a token bucket (ADR-0006 §3) that fails open if the
-    // DO is unreachable; like the per-IP limit it is an abuse limit, not a quota.
-    const perGuest = await ports.rateLimiter.check(
-      'booking:guest-host',
-      guestLimitKey(host.id, email),
-      GUEST_EMAIL_DAILY_LIMIT,
-      GUEST_EMAIL_WINDOW_SECONDS,
-    )
-    if (!perGuest.allowed) {
+    // At most GUEST_EMAIL_DAILY_LIMIT bookings per guest email per host per
+    // day, counted from the bookings that exist (read from the primary, so a
+    // booking made a second ago is seen). A failed attempt (slot taken,
+    // calendar down) therefore costs nothing, and `anna+2@x.dk` is `anna@x.dk`.
+    const hostUsers = data.hosts ? hostUsers_(data.hosts) : [host]
+    const now = ports.clock.now()
+    const made = (
+      await Promise.all(
+        hostUsers.map((u) =>
+          repos.bookings.listForHost(u.id, { start: now - GUEST_EMAIL_WINDOW_MS, end: now + 400 * 86_400_000 }),
+        ),
+      )
+    ).flat()
+    if (countRecentGuestBookings(made, email, now) >= GUEST_EMAIL_DAILY_LIMIT) {
       return c.html(
         guestPageHead(ports, lang, t(lang.locale, 'err.guestLimit.title')) +
           eventHeader(data) +
           errorPage(t(lang.locale, 'err.guestLimit.title'), t(lang.locale, 'err.guestLimit.body')) +
           shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
         429,
-        {
-          ...guestHeaders(lang, c),
-          'retry-after': String(Math.ceil((perGuest.resetAt - ports.clock.now()) / 1000)),
-        },
+        { ...guestHeaders(lang, c), 'retry-after': '3600' },
       )
     }
 
-    if (colleagues.ok && colleagues.emails.length > 0) declared[COLLEAGUES_ANSWER_KEY] = colleagues.emails.join(', ')
-
-    const hostUsers = data.hosts ? hostUsers_(data.hosts) : [host]
     const outcome = await ports.coordinator.book(host.id, {
       eventTypeId: eventType.id,
       hostUserIds: hostUsers.map((u) => u.id),

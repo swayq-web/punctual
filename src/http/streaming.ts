@@ -26,11 +26,15 @@
  * the stylesheet in `head` while D1 is still being read — the paint is already
  * set up by the time the content lands.
  */
+const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
 export function streamPage(
   head: string,
   body: () => Promise<string>,
   foot: string,
   init: ResponseInit = {},
+  /** What the guest sees if the body fails after the head went out; the caller passes its own language. */
+  failure: { title: string; body: string } = { title: 'Something went wrong', body: 'Please reload the page.' },
 ): Response {
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
@@ -44,8 +48,8 @@ export function streamPage(
         console.error('[punctual] streamed body failed', err)
         controller.enqueue(
           encoder.encode(
-            '<section class="pu-card"><h1>Something went wrong</h1>' +
-              '<p class="pu-muted">Please reload the page.</p></section>',
+            `<section class="pu-card"><h1>${esc(failure.title)}</h1>` +
+              `<p class="pu-muted">${esc(failure.body)}</p></section>`,
           ),
         )
       }

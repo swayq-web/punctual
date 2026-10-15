@@ -302,8 +302,6 @@ export interface BookingPageData {
   langExplicit?: boolean
   /** Turnstile site key, when the confirm form must carry a challenge. */
   turnstileSiteKey?: string
-  /** Colleagues the guest typed, kept when the form is shown again after an error. */
-  colleaguesValue?: string
 }
 
 const loc = (d: { locale?: Locale }): Locale => d.locale ?? 'en'
@@ -812,13 +810,6 @@ export function confirmForm(
            ${errors['email'] ? 'aria-describedby="err-email"' : ''}>
     ${errors['email'] ? `<p class="pu-err" id="err-email">${escapeHtml(errors['email'])}</p>` : ''}
     ${questions}
-    <label for="colleagues">${escapeHtml(t(locale, 'confirm.colleagues'))} <span class="pu-muted">${escapeHtml(t(locale, 'confirm.optional'))}</span></label>
-    <input id="colleagues" name="colleagues" type="text" inputmode="email" autocomplete="off" maxlength="400"
-           placeholder="a@example.com, b@example.com"
-           value="${escapeHtml(values['x_colleagues'] ?? '')}"
-           aria-describedby="hint-colleagues${errors['x_colleagues'] ? ' err-colleagues' : ''}">
-    <p class="pu-muted" id="hint-colleagues" style="font-size:.8125rem;margin:.25rem 0 0">${escapeHtml(t(locale, 'confirm.colleaguesHint'))}</p>
-    ${errors['x_colleagues'] ? `<p class="pu-err" id="err-colleagues">${escapeHtml(errors['x_colleagues'])}</p>` : ''}
     ${errors['captcha'] ? `<p class="pu-err" role="alert">${escapeHtml(errors['captcha'])}</p>` : ''}
     ${d.turnstileSiteKey ? `<div class="cf-turnstile pu-turnstile" data-sitekey="${escapeHtml(d.turnstileSiteKey)}" data-language="${locale}" data-theme="light"></div>` : ''}
     <p class="pu-muted" style="font-size:.8125rem;margin:1rem 0 0">${escapeHtml(t(locale, 'confirm.inviteNote'))}</p>

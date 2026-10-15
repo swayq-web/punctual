@@ -6,9 +6,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   GUEST_EMAIL_DAILY_LIMIT,
+  countRecentGuestBookings,
   findOtherUpcomingGuestBooking,
-  guestLimitKey,
-  parseColleagues,
+  normalizeGuestEmail,
 } from '../../src/core/domain/guest-history.js'
 import type { Booking } from '../../src/core/domain/types.js'
 import { SWAYQ_SURFACES, blockedByForm, blockedSurface, type SurfaceFlags } from '../../src/swayq-surfaces.js'
@@ -54,9 +54,28 @@ describe('guest email helpers', () => {
   const booking = (patch: Partial<Booking>): Booking =>
     ({ id: 'b', guestEmail: 'a@x.dk', status: 'confirmed', startUtc: 2_000, ...patch }) as Booking
 
-  it('the limit is three and keyed by host and normalised email', () => {
+  it('the limit is three; case, space and a +tag never buy a second identity', () => {
     expect(GUEST_EMAIL_DAILY_LIMIT).toBe(3)
-    expect(guestLimitKey('h1', '  Anna@X.dk ')).toBe('h1:anna@x.dk')
+    expect(normalizeGuestEmail('  Anna@X.dk ')).toBe('anna@x.dk')
+    expect(normalizeGuestEmail('anna+2@x.dk')).toBe('anna@x.dk')
+    expect(normalizeGuestEmail('a+b+c@x.dk')).toBe('a@x.dk')
+    expect(normalizeGuestEmail('+tag@x.dk')).toBe('+tag@x.dk') // nothing before the plus: left alone
+    expect(normalizeGuestEmail('nope')).toBe('nope')
+  })
+
+  it('counts only confirmed bookings this guest made in the last day, once each', () => {
+    const now = 10 * 86_400_000
+    const mk = (id: string, patch: Partial<Booking>) => booking({ id, createdAt: now - 1_000, ...patch })
+    const list = [
+      mk('a', {}),
+      mk('a', {}), // the same booking listed twice (collective hosts)
+      mk('b', { guestEmail: 'A+x@X.DK' }),
+      mk('old', { createdAt: now - 25 * 3_600_000 }),
+      mk('cancelled', { status: 'cancelled' }),
+      mk('moved', { rescheduleOf: 'a' }),
+      mk('other', { guestEmail: 'z@x.dk' }),
+    ]
+    expect(countRecentGuestBookings(list, 'a@x.dk', now)).toBe(2)
   })
 
   it('finds the earliest OTHER upcoming confirmed booking of the same guest', () => {
@@ -71,20 +90,6 @@ describe('guest email helpers', () => {
     ]
     expect(findOtherUpcomingGuestBooking(others, current, 1_000)).toBe(4_000)
     expect(findOtherUpcomingGuestBooking([current], current, 1_000)).toBeNull()
-  })
-
-  it('colleagues: split on comma, semicolon or space; lower-case; de-duplicate; drop the booker', () => {
-    expect(parseColleagues('Bo@x.dk; bo@x.dk, cleo@x.dk  a@x.dk', 'A@X.dk')).toEqual({
-      ok: true,
-      emails: ['bo@x.dk', 'cleo@x.dk'],
-    })
-    expect(parseColleagues('', 'a@x.dk')).toEqual({ ok: true, emails: [] })
-  })
-
-  it('colleagues: an invalid address names itself; more than three is an error, not a truncation', () => {
-    expect(parseColleagues('ok@x.dk, nope', 'a@x.dk')).toEqual({ ok: false, error: 'invalid', email: 'nope' })
-    expect(parseColleagues('a1@x.dk a2@x.dk a3@x.dk a4@x.dk', 'a@x.dk')).toEqual({ ok: false, error: 'too_many' })
-    expect(parseColleagues('a1@x.dk a2@x.dk a3@x.dk a1@x.dk', 'a@x.dk').ok).toBe(true)
   })
 })
 

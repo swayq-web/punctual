@@ -3093,6 +3093,10 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     return true
   }
 
+  /** Host dashboard copy: English by design (the dashboard is not localized). */
+  const CALENDAR_UNAVAILABLE_MOVE =
+    "We can't check this host's calendar right now, so the booking was not moved. Please try again later or contact the host."
+
   type RescheduleResult =
     | { ok: true; booking: Booking; manageToken?: string }
     | { ok: false; reason: 'slot_taken' | 'superseded' | 'calendar_unavailable' }
@@ -3131,6 +3135,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
       guestName: old.guestName,
       guestEmail: old.guestEmail,
       guestTimezone: old.guestTimezone,
+      ...(old.guestLocale ? { guestLocale: old.guestLocale } : {}),
       answers: old.answers,
       rescheduleOf: old.id,
     })

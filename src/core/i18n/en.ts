@@ -50,8 +50,6 @@ export const en = {
   'confirm.email': 'Email',
   'confirm.optional': '(optional)',
   'confirm.agenda': 'What would you like to discuss?',
-  'confirm.colleagues': 'Add colleagues',
-  'confirm.colleaguesHint': 'Up to 3 email addresses, separated by commas. They will be added to the booking.',
   'confirm.submit': 'Confirm booking',
   'confirm.back': 'Back',
   'confirm.inviteNote': 'You will receive a calendar invitation from Google.',
@@ -64,8 +62,6 @@ export const en = {
   'err.required': 'This field is required',
   'err.option': 'Not one of the available options',
   'err.tooLong': 'Too long (max 2000 characters)',
-  'err.colleagueInvalid': '{email} is not a valid email address',
-  'err.colleaguesMax': 'You can add up to 3 colleagues',
   'err.captcha': 'We could not verify that you are a person. Please try again.',
   'err.guestLimit.title': 'Daily limit reached',
   'err.guestLimit.body':
@@ -73,6 +69,8 @@ export const en = {
   'err.tooManyBookings.title': 'Too many bookings',
   'err.tooManyRequests.title': 'Too many requests',
   'err.waitAndRetry': 'Please wait a little and try again.',
+  'err.broken.title': 'Something went wrong',
+  'err.broken.body': 'Please reload the page.',
   'err.notFound.title': 'Not found',
   'err.notFound.body': 'That booking page does not exist.',
   'err.couldNotBook.title': 'Could not complete booking',
@@ -81,9 +79,10 @@ export const en = {
   'taken.title': 'That time was just taken',
   'taken.body': 'Someone booked it while you were filling in the form. Here are the other times that day.',
   'taken.cta': 'See available times',
-  'bookingDrifted.title': 'That time just changed',
-  'bookingDrifted.body': 'The host calendar changed while you were booking, so this time is no longer available. Please pick another time.',
-  'calendarUnavailable.title': 'Booking is temporarily unavailable',
+  'bookingDrifted.title': 'This meeting was changed',
+  'bookingDrifted.body':
+    'This meeting was changed on the host’s calendar, so it can no longer be rescheduled or cancelled here. Please contact the host directly.',
+  'calendarUnavailable.title': 'Temporarily unavailable',
   'calendarUnavailable.body':
     'We cannot check the host calendar right now, so no times are shown and nothing has been booked. Please try again later or contact the host.',
 
