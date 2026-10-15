@@ -135,6 +135,16 @@ export async function saveCalendarConnection(
     connection.calendarIdWrite = primary.id
     selectionChanged = true
   }
+  // listCalendars failed (or returned nothing), so nothing was selected
+  // above. A Google row must never be saved green with an empty read list
+  // that reads as "no conflicts": select `primary` explicitly, the same
+  // calendar the adapter falls back to, so conflict checking is on and the
+  // connections page shows what is being read (SWA-1285). Microsoft keeps
+  // its empty list on purpose: that is its mailbox fallback (see above).
+  if (provider !== 'microsoft' && connection.calendarIdsRead.length === 0) {
+    connection.calendarIdsRead = ['primary']
+    selectionChanged = true
+  }
 
   const calendarUsable = async (): Promise<void> => {
     if (!deps.onCalendarUsable || connection.calendarIdWrite === null) return

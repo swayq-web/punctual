@@ -430,11 +430,13 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       // the host-local scheduling constraints (per-day cap, max horizon).
       const DAY_MS = 24 * 60 * 60 * 1000
       const hostMonthRange = monthRange(month, host.tz)
+      const calendarUnavailable = new Set<string>()
       const monthSlots = await slots.forEventType({
         eventType,
         hostUsers,
         range: { start: hostMonthRange.start - DAY_MS, end: hostMonthRange.end + DAY_MS },
         scope: publicScope,
+        onCalendarUnavailable: (id) => calendarUnavailable.add(id),
       })
 
       const daySlots = selectedDate
@@ -450,6 +452,13 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
         daysWithSlots: daysWithSlots(monthSlots, guestTimezone),
         selectedDate,
         slots: daySlots,
+      }
+
+      // ---- calendarUnavailable (SWA-1285) --------------------------------
+      // A host's calendar could not be read and no other host has a free
+      // time, so "no times available" would be a lie. Say what happened.
+      if (monthSlots.length === 0 && calendarUnavailable.size > 0) {
+        return `${hostsRow(data)}${calendarUnavailableNotice()}`
       }
 
       return `${hostsRow(data)}<div class="pu-grid">${monthGrid(data)}${slotList(data)}</div>`
@@ -600,6 +609,20 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       idempotencyKey: c.req.header('idempotency-key') ?? undefined,
     })
 
+    if (!outcome.ok && outcome.reason === 'calendar_unavailable') {
+      // ---- calendarUnavailable (SWA-1285) --------------------------------
+      // Refused because a host's calendar could not be read, never committed
+      // blind. Retryable, so 503 and a page that says so; nothing was booked.
+      return c.html(
+        shellHead({ title: 'Temporarily unavailable', brandName: ports.config.brandName }) +
+          eventHeader(data) +
+          calendarUnavailableNotice() +
+          shellFoot(true, embed, displayCompany(data)),
+        503,
+        { 'retry-after': '30' },
+      )
+    }
+
     if (!outcome.ok) {
       // A listed slot can be lost — replicas lag, and round-robin listings are
       // advisory about who. Expected, so it reads as a step, not a failure.
@@ -649,6 +672,18 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
 
 // ---------------------------------------------------------------------------
 
+
+/**
+ * Shown when a host's calendar could not be read (SWA-1285). Plain English
+ * on purpose: the i18n integrator swaps this copy for the
+ * `calendarUnavailable` key.
+ */
+function calendarUnavailableNotice(): string {
+  return errorPage(
+    'Temporarily unavailable',
+    "We can't check this host's calendar right now, so no times are shown and nothing has been booked. Please try again later or contact the host.",
+  )
+}
 
 /**
  * The guest's timezone.

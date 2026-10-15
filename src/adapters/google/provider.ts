@@ -200,10 +200,14 @@ export function createGoogleProvider(deps: CalendarProviderDeps): CalendarProvid
  */
 export function parseGoogleFreeBusy(json: unknown): Interval[] {
   const out: Interval[] = []
-  if (!isRecord(json)) return out
+  // Unparseable is unavailable, never free (SWA-1285): a 200 with no
+  // `calendars` key says nothing about busy time.
+  if (!isRecord(json)) throw new CalendarApiError('google', 'freeBusy response is not an object')
 
   const calendars = json['calendars']
-  if (calendars === undefined || calendars === null) return out
+  if (calendars === undefined || calendars === null) {
+    throw new CalendarApiError('google', 'freeBusy response has no calendars')
+  }
 
   const entries: Array<[string, unknown]> = Array.isArray(calendars)
     ? calendars.map((value, i) => [

@@ -2961,9 +2961,11 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
           ...base,
           days: await hostRescheduleDays(c, { ...access, eventType }),
           error:
-            moved.reason === 'slot_taken'
-              ? 'That time was just taken. Pick another one.'
-              : 'This booking was already updated elsewhere. Reload and try again.',
+            moved.reason === 'calendar_unavailable'
+              ? CALENDAR_UNAVAILABLE_MOVE
+              : moved.reason === 'slot_taken'
+                ? 'That time was just taken. Pick another one.'
+                : 'This booking was already updated elsewhere. Reload and try again.',
         }),
         409,
       )
@@ -3089,9 +3091,13 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     return true
   }
 
+  /** SWA-1285. Plain English; the i18n integrator swaps this for a `calendarUnavailable` key. */
+  const CALENDAR_UNAVAILABLE_MOVE =
+    "We can't check this host's calendar right now, so the booking was not moved. Please try again later or contact the host."
+
   type RescheduleResult =
     | { ok: true; booking: Booking; manageToken?: string }
-    | { ok: false; reason: 'slot_taken' | 'superseded' }
+    | { ok: false; reason: 'slot_taken' | 'superseded' | 'calendar_unavailable' }
 
   /**
    * Move a confirmed booking to `start`: book the replacement through the
@@ -3130,7 +3136,10 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
       answers: old.answers,
       rescheduleOf: old.id,
     })
-    if (!outcome.ok) return { ok: false, reason: 'slot_taken' }
+    if (!outcome.ok) {
+      // A calendar we could not read is not a taken slot (SWA-1285).
+      return { ok: false, reason: outcome.reason === 'calendar_unavailable' ? 'calendar_unavailable' : 'slot_taken' }
+    }
 
     // Only after the new booking exists: `markRescheduled` releases the old
     // slot locks, and releasing them before the replacement is committed would
@@ -3338,9 +3347,11 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
           token,
           purpose: 'reschedule',
           error:
-            moved.reason === 'slot_taken'
-              ? 'That time was just taken. Pick another one.'
-              : 'This booking was already updated elsewhere. Refresh and try again.',
+            moved.reason === 'calendar_unavailable'
+              ? CALENDAR_UNAVAILABLE_MOVE
+              : moved.reason === 'slot_taken'
+                ? 'That time was just taken. Pick another one.'
+                : 'This booking was already updated elsewhere. Refresh and try again.',
         }),
         409,
       )
