@@ -32,7 +32,7 @@ import { isValidEmail } from '../../core/domain/booking-service.js'
 import { notifyBookingCancelled } from '../../adapters/notify.js'
 import { dispatchConfirmation } from '../../adapters/queue/consumer.js'
 import { z } from 'zod'
-import type { EnginePorts, RequestScope } from '../../ports.js'
+import type { BookingFailureReason, EnginePorts, RequestScope } from '../../ports.js'
 import type { SlotService } from '../../engine.js'
 import type { Booking, EventType, User } from '../../core/domain/types.js'
 import { effectiveQuestions, pickDeclaredAnswers, validateAnswers } from '../../core/domain/booking-service.js'
@@ -894,10 +894,12 @@ function bookingSummary(
 
 /** Phrased for a model that has to decide what to do next, not for a log. */
 function failureMessage(
-  reason: 'slot_taken' | 'outside_availability' | 'policy' | 'lease_failed',
+  reason: BookingFailureReason,
   detail?: string,
 ): string {
   switch (reason) {
+    case 'calendar_unavailable':
+      return "The host's calendar could not be checked right now, so this time could not be confirmed free. Nothing was booked. Retry this call in a minute."
     case 'slot_taken':
       return 'That time was taken while this request was in flight. Call get_available_slots again and choose another slot.'
     case 'outside_availability':

@@ -129,7 +129,7 @@ export function createCoordinator(deps: CoordinatorDeps): HostCoordinator {
         // be fetched and the booking would commit on top of it.
         const footprint = bookingFootprint(request.start, request.end, eventType)
         const settings = await hostSettings(repos, eventType)
-        const hosts = await buildHostInputs(
+        const { hosts, calendarFailedHostIds } = await buildHostInputs(
           ports,
           repos,
           request.hostUserIds,
@@ -139,7 +139,27 @@ export function createCoordinator(deps: CoordinatorDeps): HostCoordinator {
           request.holdId,
           settings,
         )
-        if (hosts.length === 0) return { ok: false, reason: 'outside_availability' }
+        // Fail CLOSED on an unreadable calendar (SWA-1285). A host whose
+        // external calendar could not be read is never treated as free: an
+        // outage must never produce a double booking. Which failures refuse
+        // the whole commit depends on whether the host must attend:
+        //   - personal: the one host must attend, so any failure refuses;
+        //   - collective, REQUIRED host: must attend, so it refuses;
+        //   - collective, OPTIONAL host: dropped from the input below and so
+        //     treated as not attending, the same as an optional host that is
+        //     busy. The booking lands without them, never on top of a meeting
+        //     we could not see;
+        //   - round-robin: the failed member is simply not a candidate; the
+        //     booking goes to another member who is verifiably free, and is
+        //     refused only if no candidate remains (handled after prepare).
+        const mustAttend = (id: string) =>
+          eventType.schedulingType !== 'round_robin' && settings.get(id)?.required !== false
+        if (calendarFailedHostIds.some(mustAttend)) {
+          return { ok: false, reason: 'calendar_unavailable' }
+        }
+        if (hosts.length === 0) {
+          return { ok: false, reason: calendarFailedHostIds.length > 0 ? 'calendar_unavailable' : 'outside_availability' }
+        }
         // How many of the requested hosts MUST be present for a collective
         // booking: the required ones. A required host that failed to
         // resolve (no availability at all) fails the booking rather than
@@ -190,6 +210,12 @@ export function createCoordinator(deps: CoordinatorDeps): HostCoordinator {
         })
 
         if (!prepared.ok) {
+          // A round-robin member we could not read might have been the free
+          // one, so "taken" / "outside availability" would be a guess; say
+          // what actually happened instead.
+          if (calendarFailedHostIds.length > 0 && eventType.schedulingType === 'round_robin') {
+            return { ok: false, reason: 'calendar_unavailable' }
+          }
           return {
             ok: false,
             reason: prepared.reason === 'no_eligible_host' ? 'outside_availability' : prepared.reason,
@@ -413,8 +439,9 @@ async function buildHostInputs(
   excludeHoldId?: string,
   /** Per-host schedule and required/optional, from `hostSettings` — empty for a personal event type or an implicit host set. */
   settings: Awaited<ReturnType<typeof hostSettings>> = new Map(),
-): Promise<HostAvailabilityInput[]> {
+): Promise<{ hosts: HostAvailabilityInput[]; calendarFailedHostIds: string[] }> {
   const now = ports.clock.now()
+  const calendarFailedHostIds: string[] = []
   const [busyByHost, holdsByHost] = await Promise.all([
     repos.slotLocks.busyBuckets(hostUserIds, range),
     repos.slotLocks.activeHolds(hostUserIds, range, now, excludeHoldId),
@@ -435,19 +462,30 @@ async function buildHostInputs(
     if (!user || !availability) continue
 
     const external: Array<{ start: number; end: number }> = []
+    let calendarFailed = false
     for (const conn of partitionConnections(connections).read) {
       try {
         external.push(...(await ports.calendars.get(conn.provider).getBusy(conn, range)))
       } catch (err) {
-        // A provider outage must not block bookings outright; slot_locks still
-        // prevents conflicts with our own bookings. A REVOKED grant is
-        // different — it never recovers on its own, so it is recorded and the
-        // host gets a reconnect prompt instead of silently losing conflict
-        // checking on every future booking.
+        // Fail CLOSED. slot_locks only protects against OUR bookings; an
+        // external meeting is invisible to it, so committing without this
+        // read would land the booking on top of whatever we failed to see.
+        // Any error counts: a provider outage, a per-calendar freeBusy error
+        // (parseGoogleFreeBusy throws on those), or a revoked grant. The
+        // caller decides whether this host's failure refuses the booking.
+        calendarFailed = true
+        // A REVOKED grant never recovers on its own, so it is also recorded
+        // and the host gets a reconnect prompt.
         if (needsReconnect(err)) {
           await repos.connections.updateSyncStatus(conn.id, 'needs_reconnect').catch(() => {})
         }
       }
+    }
+    if (calendarFailed) {
+      // Excluded from the host input: a host we could not read is never
+      // offered to the booking as free.
+      calendarFailedHostIds.push(id)
+      continue
     }
 
     // The cap MUST be populated here, not left undefined. `isSlotStillValid`
@@ -475,5 +513,5 @@ async function buildHostInputs(
       bookingsPerLocalDate: perDay,
     })
   }
-  return out
+  return { hosts: out, calendarFailedHostIds }
 }

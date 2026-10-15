@@ -38,7 +38,7 @@ import type {
 import { canManageTeam } from '../../core/domain/teams.js'
 import { currentHostIds, notifyNewHosts } from '../host-notifications.js'
 import { hostUsers, hostsForReschedule, resolveHosts as resolveEventTypeHosts, type ResolvedHost } from '../../core/domain/hosts.js'
-import type { EnginePorts, Repositories, RequestScope } from '../../ports.js'
+import type { BookingFailureReason, EnginePorts, Repositories, RequestScope } from '../../ports.js'
 import type { SlotService } from '../../engine.js'
 import { authenticateApiKey } from '../../core/domain/auth-flows.js'
 import { parseApiKey } from '../../core/domain/auth-service.js'
@@ -1316,10 +1316,19 @@ export function notFound(what: string): Response {
 
 /** One mapping from a coordinator refusal to a status code, for REST and MCP. */
 export function bookingFailure(
-  reason: 'slot_taken' | 'outside_availability' | 'policy' | 'lease_failed',
+  reason: BookingFailureReason,
   detail?: string,
 ): Response {
   switch (reason) {
+    case 'calendar_unavailable':
+      // Retryable: a host's calendar could not be read, so the slot could not
+      // be verified free. Refused rather than committed blind (SWA-1285).
+      return problem(
+        503,
+        'Calendar unavailable',
+        "A host's calendar could not be checked right now, so this time could not be confirmed. Retry shortly.",
+        { headers: { 'retry-after': '30' } },
+      )
     case 'slot_taken':
       return problem(409, 'Slot taken', detail ?? 'That time was booked while this request was in flight.')
     case 'outside_availability':

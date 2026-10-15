@@ -28,6 +28,13 @@ export interface SlotService {
     hostUsers: User[]
     range: Interval
     scope?: RequestScope
+    /**
+     * Called once per host whose external calendar could not be read. That
+     * host contributes NO slots (it is treated as busy for the whole range,
+     * never as free), so a caller that gets an empty list can tell "nothing
+     * free" apart from "we could not check" and say so honestly.
+     */
+    onCalendarUnavailable?: (hostUserId: string) => void
   }): Promise<Slot[]>
 }
 
@@ -82,7 +89,7 @@ export async function resolveSchedule(
  */
 export function createSlotService(ports: EnginePorts): SlotService {
   return {
-    async forEventType({ eventType, hostUsers, range, scope }) {
+    async forEventType({ eventType, hostUsers, range, scope, onCalendarUnavailable }) {
       const repos = ports.repositories(scope ?? { consistency: 'unconstrained' })
       const hostIds = hostUsers.map((u) => u.id)
       if (hostIds.length === 0) return []
@@ -126,6 +133,7 @@ export function createSlotService(ports: EnginePorts): SlotService {
             externalBusyFor(ports, repos, user.id, busyRange),
           ])
           if (!availability) return null
+          if (external === CALENDAR_UNAVAILABLE) onCalendarUnavailable?.(user.id)
           const perDay = await perDayCounts(repos, user, range, eventType, availability.timezone)
           return {
             hostUserId: user.id,
@@ -134,7 +142,13 @@ export function createSlotService(ports: EnginePorts): SlotService {
             busy: combineBusy(
               busyByHost.get(user.id) ?? [],
               holdsByHost.get(user.id) ?? [],
-              external,
+              // Fail CLOSED (SWA-1285): an unreadable calendar makes the host
+              // busy for the whole queried range. For a personal event that
+              // is zero slots; for a collective event a required host blocks
+              // every slot and an optional one never joins; for round-robin
+              // the other members still list. Same semantics as the commit
+              // path in adapters/coordinator.ts.
+              external === CALENDAR_UNAVAILABLE ? [busyRange] : external,
             ),
             bookingsPerLocalDate: perDay,
           }
@@ -147,26 +161,35 @@ export function createSlotService(ports: EnginePorts): SlotService {
   }
 }
 
+/** Sentinel: at least one of the host's calendars could not be read. */
+const CALENDAR_UNAVAILABLE = Symbol('calendar_unavailable')
+
 /**
  * External calendar busy time, via the freeBusy cache.
  *
- * A cache miss or provider failure yields an EMPTY busy set, which means the
- * host may be offered a slot they are actually busy for. That is the correct
- * trade for a listing: the mandatory pre-commit re-check (ADR-0002 §2) catches
- * it, so the failure mode is a rare 409 rather than a booking page that breaks
- * whenever Google has a bad minute.
+ * A provider failure (outage, per-calendar freeBusy error, revoked grant)
+ * returns `CALENDAR_UNAVAILABLE`, and the caller treats the host as busy for
+ * the whole range. It used to degrade to an EMPTY busy set, on the theory
+ * that the commit-time re-check would catch any conflict; but that re-check
+ * read the same failing provider and also proceeded blind, so an outage let a
+ * booking land on top of a real meeting. An outage must never produce a
+ * double booking, so both paths now fail closed (SWA-1285).
+ *
+ * Only SUCCESSFUL reads are cached. A failure is never cached as "no busy
+ * time", so the next request after the provider recovers reads it live.
  */
 async function externalBusyFor(
   ports: EnginePorts,
   repos: ReturnType<EnginePorts['repositories']>,
   userId: string,
   range: Interval,
-): Promise<Interval[]> {
+): Promise<Interval[] | typeof CALENDAR_UNAVAILABLE> {
   const connections = await repos.connections.listForUser(userId)
   const { read } = partitionConnections(connections)
   if (read.length === 0) return []
 
   const out: Interval[] = []
+  let failed = false
   for (const conn of read) {
     const key = `fb:${conn.id}:${range.start}:${range.end}`
     const cached = await ports.cache.get<Interval[]>(key)
@@ -177,20 +200,19 @@ async function externalBusyFor(
     try {
       const provider = ports.calendars.get(conn.provider)
       const busy = await provider.getBusy(conn, range)
-      // 60 s TTL — the spec's number, and also KV's own minimum.
+      // 60 s TTL, the spec's number, and also KV's own minimum.
       await ports.cache.put(key, busy, 60)
       out.push(...busy)
     } catch (err) {
-      // Degrade to "no known busy time" rather than failing the page — but a
-      // REVOKED grant must be recorded, or conflict checking silently switches
-      // off and bookings land on top of real meetings with the connections
-      // page still showing a green badge.
+      failed = true
+      // A REVOKED grant never recovers on its own: record it so the
+      // connections page shows a reconnect prompt instead of a green badge.
       if (needsReconnect(err)) {
         await repos.connections.updateSyncStatus(conn.id, 'needs_reconnect').catch(() => {})
       }
     }
   }
-  return out
+  return failed ? CALENDAR_UNAVAILABLE : out
 }
 
 /** Per-day booking counts, only when the event type actually caps them. */

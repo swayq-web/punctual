@@ -923,7 +923,22 @@ export type BookingOutcome =
    * a retry can confirm the booking exists but cannot re-issue its link.
    */
   | { ok: true; booking: Booking; manageToken?: string }
-  | { ok: false; reason: 'slot_taken' | 'outside_availability' | 'policy' | 'lease_failed'; detail?: string }
+  | { ok: false; reason: BookingFailureReason; detail?: string }
+
+/**
+ * Why a commit was refused.
+ *
+ * `calendar_unavailable` means a host's external calendar could not be read
+ * at commit time (provider outage, per-calendar freeBusy error, revoked
+ * grant). The booking is refused rather than committed blind: an outage must
+ * never produce a double booking. Retryable once the provider recovers.
+ */
+export type BookingFailureReason =
+  | 'slot_taken'
+  | 'outside_availability'
+  | 'policy'
+  | 'lease_failed'
+  | 'calendar_unavailable'
 
 // ---------------------------------------------------------------------------
 // Rate limiting
