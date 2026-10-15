@@ -21,9 +21,22 @@ import type { CompanyLogo,
   Team, EventType, Slot, User } from '../../core/domain/types.js'
 import { effectiveQuestions } from '../../core/domain/booking-service.js'
 import { slotStateClassName } from '../../core/slot-state.js'
-import { formatInZone, localDateString, offsetLabel } from '../../core/time/zone.js'
+import { localDateString, offsetLabel } from '../../core/time/zone.js'
 import { embedResizeScriptTag } from '../embed.js'
 import { pageCss } from '../styles.js'
+import { guestPageCss, SWAYQ_FONT_FILES, SWAYQ_PAGE } from '../swayq-skin.js'
+import { SWAYQ_SURFACES } from '../../swayq-surfaces.js'
+import {
+  formatDateTime,
+  formatLocalDate,
+  formatMonthYear,
+  formatWhenLong,
+  t,
+  tHtml,
+  weekdayNames,
+  weekStartsOn,
+  type Locale,
+} from '../../core/i18n/index.js'
 
 /**
  * The wordmark in a public-facing footer always points here, not at `/` —
@@ -69,26 +82,67 @@ export interface PageChrome {
    * folds back into one result.
    */
   canonical?: string
+  /**
+   * A guest-facing page: SwayQ skin (Poppins, light tokens, wordmark), the
+   * guest's locale on `<html lang>`, and the EN/DA toggle. Dashboard and
+   * marketing pages leave this off and keep upstream's look.
+   */
+  guest?: boolean
+  locale?: Locale
+  /** Builds the toggle's link for the OTHER locale; absent on a POST response, where a GET to the same URL would be wrong. */
+  langHref?: (locale: Locale) => string
+  /**
+   * The URL carries a credential (a manage token). No referrer leaves the
+   * page, nothing is indexed, and no third-party origin is ever named.
+   */
+  sensitive?: boolean
+  /** Inside the embed iframe: no topbar. */
+  embed?: boolean
+  /** Extra markup for `<head>`, e.g. the Turnstile script on the confirm form. */
+  headExtra?: string
+}
+
+/** The EN/DA switch. Plain links: it works with no script, and `aria-current` marks the active one. */
+export function langToggleHtml(locale: Locale, langHref: (l: Locale) => string): string {
+  const item = (l: Locale): string =>
+    l === locale
+      ? `<span aria-current="true">${escapeHtml(t(l, l === 'en' ? 'lang.en' : 'lang.da'))}</span>`
+      : `<a href="${escapeHtml(langHref(l))}" hreflang="${l}" lang="${l}" rel="nofollow" aria-label="${escapeHtml(t(l, l === 'en' ? 'lang.enName' : 'lang.daName'))}">${escapeHtml(t(l, l === 'en' ? 'lang.en' : 'lang.da'))}</a>`
+  return `<nav class="pu-lang" aria-label="${escapeHtml(t(locale, 'lang.label'))}">${item('en')}${item('da')}</nav>`
+}
+
+/** `swayq.` — lowercase, one colour: the period is part of the word, never an accent. */
+export function wordmarkText(brandName: string): string {
+  return `${brandName.toLowerCase().replace(/\s+/g, '')}.`
+}
+
+export function wordmarkHtml(brandName: string): string {
+  const text = wordmarkText(brandName)
+  return `<span class="pu-mark" aria-label="${escapeHtml(brandName)}">${escapeHtml(text.slice(0, -1))}<span>.</span></span>`
 }
 
 /**
  * Everything before the first data-dependent byte. Flushed immediately.
  */
 export function shellHead(chrome: PageChrome): string {
+  const guest = chrome.guest === true
+  const locale = chrome.locale ?? 'en'
+  const noindex = chrome.sensitive === true || !chrome.canonical
   return `<!doctype html>
-<html lang="en">
+<html lang="${locale}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(chrome.title)}</title>
 ${chrome.description ? `<meta name="description" content="${escapeHtml(chrome.description)}">` : ''}
-<meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="${chrome.themeColor ?? '#0E7C4C'}">
+<meta name="color-scheme" content="${guest ? 'light' : 'light dark'}">
+<meta name="theme-color" content="${chrome.themeColor ?? (guest ? SWAYQ_PAGE : '#0E7C4C')}">
+${chrome.sensitive ? '<meta name="referrer" content="no-referrer">' : ''}
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 ${
-  chrome.canonical
-    ? `<link rel="canonical" href="${escapeHtml(chrome.canonical)}">`
-    : '<meta name="robots" content="noindex">'
+  noindex
+    ? '<meta name="robots" content="noindex">'
+    : `<link rel="canonical" href="${escapeHtml(chrome.canonical!)}">`
 }
 ${
   chrome.og
@@ -110,15 +164,27 @@ ${chrome.description ? `<meta name="twitter:description" content="${escapeHtml(c
      the first paint is final, so a face that isn't preloaded is a face the
      visitor likely never sees on a cold cache. Inter carries all body text —
      leaving it out is what made whole pages repaint mid-view. -->
-<link rel="preload" href="/fonts/inter-variable.woff2" as="font" type="font/woff2" crossorigin>
+${
+  guest
+    ? SWAYQ_FONT_FILES.map(
+        (f) => `<link rel="preload" href="/fonts/${f}" as="font" type="font/woff2" crossorigin>`,
+      ).join('\n')
+    : `<link rel="preload" href="/fonts/inter-variable.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/schibstedgrotesk-600.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/ibmplexmono-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/ibmplexmono-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/fonts/ibmplexmono-700.woff2" as="font" type="font/woff2" crossorigin>
-<style>${pageCss()}</style>
+<link rel="preload" href="/fonts/ibmplexmono-700.woff2" as="font" type="font/woff2" crossorigin>`
+}
+<style>${guest ? guestPageCss() : pageCss()}</style>
+${chrome.headExtra ?? ''}
 </head>
 <body>
-<div class="pu-wrap">`
+<div class="pu-wrap">${
+    guest && !chrome.embed
+      ? `
+<div class="pu-topbar">${wordmarkHtml(chrome.brandName)}${chrome.langHref ? langToggleHtml(locale, chrome.langHref) : ''}</div>`
+      : ''
+  }`
 }
 
 /**
@@ -139,7 +205,25 @@ ${chrome.description ? `<meta name="twitter:description" content="${escapeHtml(c
  * "acme scheduler:" opening punctual.sh instead of Acme's own site would be
  * an unrelated, confusing destination for that click.
  */
-export function shellFoot(poweredBy = true, embed = false, operator?: string | null): string {
+export function shellFoot(
+  poweredBy = true,
+  embed = false,
+  operator?: string | null,
+  guest?: { locale: Locale; brandName: string },
+): string {
+  if (guest) {
+    // The guest footer carries the deployment's own wordmark, not a link out
+    // to the upstream project: a guest on a manage page is holding a token and
+    // nothing here should send them (or a referrer) anywhere else.
+    const mark = wordmarkHtml(guest.brandName)
+    const foot = operator
+      ? `<p class="pu-foot">${tHtml(guest.locale, 'foot.withCompany', { company: escapeHtml(operator), mark })}</p>`
+      : `<p class="pu-foot">${tHtml(guest.locale, 'foot.scheduling', { mark })}</p>`
+    return `</div>
+${poweredBy ? foot : ''}
+${embed ? embedResizeScriptTag() : ''}
+</body></html>`
+  }
   // target="_blank": this page can be embedded in a customer's iframe
   // (`embed`, below), and an external destination navigating the iframe
   // itself in place would either hit the host site's framing restrictions
@@ -157,9 +241,9 @@ ${embed ? embedResizeScriptTag() : ''}
 }
 
 /** Placeholder emitted with the shell, replaced when slot data arrives. */
-export function slotsSkeleton(): string {
+export function slotsSkeleton(locale: Locale = 'en'): string {
   return `<div id="pu-slots" aria-busy="true" aria-live="polite">
-  <p class="pu-sr">Loading available times…</p>
+  <p class="pu-sr">${escapeHtml(t(locale, 'slots.loading'))}</p>
   ${Array.from({ length: 6 }, () => '<div class="pu-skeleton"></div>').join('\n  ')}
 </div>`
 }
@@ -210,6 +294,21 @@ export interface BookingPageData {
   confirmStart?: number
   /** True when served inside the embed iframe (`?embed=1`) — propagated through every internal link so the resize snippet keeps firing past the first navigation. */
   embed?: boolean
+  /** The guest's locale. Absent means English, which keeps every pre-i18n caller and test unchanged. */
+  locale?: Locale
+  /** `?lang=` named the locale: internal links carry it so it survives where the cookie cannot (a third-party iframe). */
+  langExplicit?: boolean
+  /** Turnstile site key, when the confirm form must carry a challenge. */
+  turnstileSiteKey?: string
+  /** Colleagues the guest typed, kept when the form is shown again after an error. */
+  colleaguesValue?: string
+}
+
+const loc = (d: { locale?: Locale }): Locale => d.locale ?? 'en'
+
+/** `&lang=da` for links, only when the locale came from the URL. */
+function langQ(d: { locale?: Locale; langExplicit?: boolean }): string {
+  return d.langExplicit && d.locale ? `&lang=${d.locale}` : ''
 }
 
 /**
@@ -228,6 +327,8 @@ export interface BookingPageData {
  */
 export function logoHtml(opts: { key: string | null; shape?: LogoShape | null; name: string; size?: number; alt?: string }): string {
   const size = opts.size ?? 40
+  // SWAYQ_SURFACES.avatars is off: the R2 route is unmounted, so an <img> would 404. Initials instead.
+  if (!SWAYQ_SURFACES.avatars) return avatarHtml({ key: null, name: opts.name, size })
   if (opts.key && opts.shape === 'natural') {
     return `<img src="/avatars/${encodeURIComponent(fitKeyFor(opts.key))}" alt="${escapeHtml(opts.alt ?? opts.name)}" height="${size}" style="height:${size}px;width:auto;max-width:${size * 3}px;object-fit:contain;display:block;flex:none" loading="lazy">`
   }
@@ -236,7 +337,7 @@ export function logoHtml(opts: { key: string | null; shape?: LogoShape | null; n
 
 export function avatarHtml(opts: { key: string | null; name: string; size?: number; alt?: string }): string {
   const size = opts.size ?? 40
-  if (opts.key) {
+  if (opts.key && SWAYQ_SURFACES.avatars) {
     return `<img src="/avatars/${encodeURIComponent(opts.key)}" alt="${escapeHtml(opts.alt ?? opts.name)}" width="${size}" height="${size}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;display:block;flex:none" loading="lazy">`
   }
   const initial = opts.name.trim().charAt(0).toUpperCase()
@@ -285,7 +386,7 @@ function identityLineHtml(d: Pick<BookingPageData, 'host' | 'eventType'>): strin
 }
 
 /** "Alice", "Alice and Bob", "Alice, Bob and Carol" — `conjunction` is "and" or "or". */
-export function joinNames(names: string[], conjunction: 'and' | 'or' = 'and'): string {
+export function joinNames(names: string[], conjunction = 'and'): string {
   if (names.length === 0) return ''
   if (names.length === 1) return names[0]!
   return `${names.slice(0, -1).join(', ')} ${conjunction} ${names[names.length - 1]}`
@@ -305,11 +406,12 @@ export function joinNames(names: string[], conjunction: 'and' | 'or' = 'and'): s
  * Hosts block ("Guests will see"): one function, so the preview and the
  * booking page cannot drift apart. Empty for a personal page or no hosts.
  */
-export function hostsSentence(d: Pick<BookingPageData, 'eventType' | 'hosts' | 'team'>): string {
+export function hostsSentence(d: Pick<BookingPageData, 'eventType' | 'hosts' | 'team' | 'locale'>): string {
   const hosts = d.hosts ?? []
   if (d.eventType.ownerTeamId === null || hosts.length === 0) return ''
   const collective = d.eventType.schedulingType === 'collective'
-  const conj = collective ? 'and' : 'or'
+  const locale = loc(d)
+  const conj = t(locale, collective ? 'hosts.and' : 'hosts.or')
   const promised = collective ? hosts.filter((h) => h.required) : hosts
   const optional = collective ? hosts.filter((h) => !h.required) : []
   const name = (h: ResolvedHost) => h.user.name || h.user.slug
@@ -320,16 +422,21 @@ export function hostsSentence(d: Pick<BookingPageData, 'eventType' | 'hosts' | '
     const rest = names.slice(3)
     return (
       `<strong>${escapeHtml(names.slice(0, 3).join(', '))}</strong>` +
-      ` <details class="pu-hosts-more"><summary>and ${rest.length} more</summary><span>${escapeHtml(joinNames(rest, conj))}</span></details>`
+      ` <details class="pu-hosts-more"><summary>${escapeHtml(t(locale, 'hosts.more', { n: rest.length }))}</summary><span>${escapeHtml(joinNames(rest, conj))}</span></details>`
     )
   }
   // The team, modestly, in parentheses after the people — unless the team
   // chose not to show its name to guests at all.
   const team = d.team && d.team.showName !== false ? ` <span class="pu-hosts-team">(${escapeHtml(d.team.name)})</span>` : ''
-  const lead = promised.length > 0 ? `${collective ? "You'll meet " : 'With one of '}${group(promised)}${team}` : ''
+  const lead =
+    promised.length > 0
+      ? tHtml(locale, collective ? 'hosts.meet' : 'hosts.withOneOf', { names: `${group(promised)}${team}` })
+      : ''
   const joins =
     optional.length > 0
-      ? `${lead ? '. ' : ''}${group(optional)} ${optional.length === 1 ? 'joins' : 'join'} when free${lead ? '' : team}`
+      ? `${lead ? '. ' : ''}${tHtml(locale, optional.length === 1 ? 'hosts.joins' : 'hosts.join', {
+          names: group(optional),
+        })}${lead ? '' : team}`
       : ''
   return `${lead}${joins}`
 }
@@ -338,7 +445,7 @@ export function hostsSentence(d: Pick<BookingPageData, 'eventType' | 'hosts' | '
  * Who the guest will meet, for a team-owned page: the avatars and the
  * sentence from `hostsSentence`. Empty for a personal page.
  */
-export function hostsRow(d: Pick<BookingPageData, 'eventType' | 'hosts' | 'team'>): string {
+export function hostsRow(d: Pick<BookingPageData, 'eventType' | 'hosts' | 'team' | 'locale'>): string {
   const hosts = d.hosts ?? []
   if (d.eventType.ownerTeamId === null || hosts.length === 0) return ''
   const collective = d.eventType.schedulingType === 'collective'
@@ -353,7 +460,7 @@ export function hostsRow(d: Pick<BookingPageData, 'eventType' | 'hosts' | 'team'
   const stack = shown.map((h) => avatarHtml({ key: h.user.avatarKey, name: name(h), size: 32 })).join('')
   const count = ordered.length > 4 ? `<span class="pu-hosts-count" aria-hidden="true">+${ordered.length - 3}</span>` : ''
 
-  return `<div class="pu-hosts" aria-label="Hosts">
+  return `<div class="pu-hosts" aria-label="${escapeHtml(t(loc(d), 'hosts.label'))}">
     <div class="pu-hosts-stack">${stack}${count}</div>
     <p class="pu-hosts-text">${hostsSentence(d)}</p>
   </div>`
@@ -392,8 +499,8 @@ function pageHead(d: BookingPageData): string {
 }
 
 export function eventHeader(d: BookingPageData): string {
-  const durationLabel = `${d.eventType.durationMinutes} min`
-  const location = locationLabel(d.eventType)
+  const durationLabel = t(loc(d), 'duration.min', { n: d.eventType.durationMinutes })
+  const location = locationLabel(d.eventType, loc(d))
   return `<header class="pu-event-header">
   ${pageHead(d)}
   <h1>${escapeHtml(d.eventType.title)}</h1>
@@ -475,7 +582,8 @@ function timezonePicker(d: BookingPageData): string {
   return `<form class="pu-tz-form" method="get" action="${escapeHtml(action)}">
     ${hiddenFields}
     ${d.embed ? '<input type="hidden" name="embed" value="1">' : ''}
-    <label class="pu-sr" for="pu-tz">Timezone</label>
+    ${d.langExplicit && d.locale ? `<input type="hidden" name="lang" value="${d.locale}">` : ''}
+    <label class="pu-sr" for="pu-tz">${escapeHtml(t(loc(d), 'tz.label'))}</label>
     <span class="pu-tz-wrap">
       <svg class="pu-tz-globe" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"
         fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -486,20 +594,20 @@ function timezonePicker(d: BookingPageData): string {
         style="width:calc(${zoneCh + offsetCh}ch + 4.5rem);padding-right:calc(${offsetCh}ch + 2.2rem)">${options}</select>
       <span class="pu-tz-offset">${escapeHtml(offset)}</span>
     </span>
-    <noscript><button type="submit" class="pu-btn pu-btn-ghost" style="padding:.15rem .5rem">Set</button></noscript>
+    <noscript><button type="submit" class="pu-btn pu-btn-ghost" style="padding:.15rem .5rem">${escapeHtml(t(loc(d), 'tz.set'))}</button></noscript>
   </form>`
 }
 
-function locationLabel(et: EventType): string {
+function locationLabel(et: EventType, locale: Locale = 'en'): string {
   switch (et.locationType) {
     case 'google_meet':
-      return 'Google Meet'
+      return t(locale, 'loc.meet')
     case 'phone':
-      return 'Phone call'
+      return t(locale, 'loc.phone')
     case 'in_person':
-      return et.locationValue ?? 'In person'
+      return et.locationValue ?? t(locale, 'loc.inPerson')
     case 'custom_link':
-      return 'Online'
+      return t(locale, 'loc.online')
     default:
       return ''
   }
@@ -518,7 +626,8 @@ export function monthGrid(d: BookingPageData): string {
   const month = Number(mStr)
   const firstOfMonth = new Date(Date.UTC(year, month - 1, 1))
   const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
-  const leading = firstOfMonth.getUTCDay()
+  const locale = loc(d)
+  const leading = (firstOfMonth.getUTCDay() - weekStartsOn(locale) + 7) % 7
   const todayLocal = localDateString(Date.now(), d.host.tz)
 
   const cells: string[] = []
@@ -532,39 +641,42 @@ export function monthGrid(d: BookingPageData): string {
     if (has) {
       const href =
         `${bookingPath(d)}?date=${date}&tz=${encodeURIComponent(d.guestTimezone)}` +
-        (d.embed ? '&embed=1' : '')
+        (d.embed ? '&embed=1' : '') +
+        langQ(d)
       cells.push(
         `<a class="pu-day" data-has-slots="1"${current}${selected} href="${escapeHtml(href)}" ` +
-          `aria-label="${escapeHtml(humanDate(date, d.guestTimezone))}, times available` +
-          `${selected ? ', selected' : ''}">${day}</a>`,
+          `aria-label="${escapeHtml(
+            t(locale, selected ? 'cal.timesAvailableSelected' : 'cal.timesAvailable', {
+              date: humanDate(date, locale),
+            }),
+          )}">${day}</a>`,
       )
     } else {
       cells.push(`<span class="pu-day" aria-disabled="true"${current}${selected}>${day}</span>`)
     }
   }
 
-  const monthLabel = new Intl.DateTimeFormat('en-US', {
-    month: 'long',
-    year: 'numeric',
-    timeZone: 'UTC',
-  }).format(firstOfMonth)
+  const monthLabel = formatMonthYear(locale, firstOfMonth)
 
   const prev = shiftMonth(d.month, -1)
   const next = shiftMonth(d.month, 1)
   const base = bookingPath(d)
-  const tzq = `&tz=${encodeURIComponent(d.guestTimezone)}${d.embed ? '&embed=1' : ''}`
+  const tzq = `&tz=${encodeURIComponent(d.guestTimezone)}${d.embed ? '&embed=1' : ''}${langQ(d)}`
 
-  return `<section class="pu-card" aria-label="Choose a day">
+  return `<section class="pu-card" aria-label="${escapeHtml(t(locale, 'cal.chooseDay'))}">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem">
     <a class="pu-btn pu-btn-ghost" style="padding:.35rem .6rem"
-       href="${escapeHtml(`${base}?month=${prev}${tzq}`)}" aria-label="Previous month">←</a>
+       href="${escapeHtml(`${base}?month=${prev}${tzq}`)}" aria-label="${escapeHtml(t(locale, 'cal.prevMonth'))}">←</a>
     <h2 style="margin:0">${escapeHtml(monthLabel)}</h2>
     <a class="pu-btn pu-btn-ghost" style="padding:.35rem .6rem"
-       href="${escapeHtml(`${base}?month=${next}${tzq}`)}" aria-label="Next month">→</a>
+       href="${escapeHtml(`${base}?month=${next}${tzq}`)}" aria-label="${escapeHtml(t(locale, 'cal.nextMonth'))}">→</a>
   </div>
   <div class="pu-cal" role="grid">
-    ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-      .map((x) => `<div class="pu-cal-head" role="columnheader" aria-label="${x}day">${x}</div>`)
+    ${weekdayNames(locale, 'short')
+      .map(
+        (x, i) =>
+          `<div class="pu-cal-head" role="columnheader" aria-label="${escapeHtml(weekdayNames(locale, 'long')[i]!)}">${escapeHtml(x)}</div>`,
+      )
       .join('')}
     ${cells.join('\n    ')}
   </div>
@@ -573,15 +685,17 @@ export function monthGrid(d: BookingPageData): string {
 
 /** Slot list for a chosen day, in the GUEST's timezone. */
 export function slotList(d: BookingPageData): string {
+  const locale = loc(d)
+  const label_ = escapeHtml(t(locale, 'slots.label'))
   if (!d.selectedDate) {
-    return `<section class="pu-card" aria-label="Available times">
-      <p class="pu-muted">Pick a day to see available times.</p></section>`
+    return `<section class="pu-card" aria-label="${label_}">
+      <p class="pu-muted">${escapeHtml(t(locale, 'slots.pickDay'))}</p></section>`
   }
   const slots = d.slots ?? []
   if (slots.length === 0) {
-    return `<section class="pu-card" aria-label="Available times">
-      <h2>${escapeHtml(humanDate(d.selectedDate, d.guestTimezone))}</h2>
-      <p class="pu-muted">No times available on this day.</p></section>`
+    return `<section class="pu-card" aria-label="${label_}">
+      <h2>${escapeHtml(humanDate(d.selectedDate, locale))}</h2>
+      <p class="pu-muted">${escapeHtml(t(locale, 'slots.none'))}</p></section>`
   }
 
   // Every slot the query engine hands back here has already cleared holds,
@@ -600,11 +714,12 @@ export function slotList(d: BookingPageData): string {
   // held/booked at all?) outside this ticket's scope.
   const items = slots
     .map((s) => {
-      const label = formatInZone(s.start, d.guestTimezone, { hour: 'numeric', minute: '2-digit' })
+      const label = formatDateTime(locale, s.start, d.guestTimezone, { hour: 'numeric', minute: '2-digit' })
       const href =
         `${bookingPath(d)}/confirm?start=${s.start}` +
         `&tz=${encodeURIComponent(d.guestTimezone)}` +
-        (d.embed ? '&embed=1' : '')
+        (d.embed ? '&embed=1' : '') +
+        langQ(d)
       // nofollow: every slot is a distinct URL, and a crawler that follows
       // them enumerates the whole calendar — ten thousand confirm fetches
       // in a fortnight on one event type. Nothing on the far side is worth
@@ -614,10 +729,10 @@ export function slotList(d: BookingPageData): string {
     })
     .join('\n    ')
 
-  return `<section class="pu-card" aria-label="Available times">
-  <h2>${escapeHtml(humanDate(d.selectedDate, d.guestTimezone))}</h2>
-  <p class="pu-muted" style="font-size:.8125rem">
-    Times shown in ${escapeHtml(d.guestTimezone)} (${escapeHtml(offsetLabel(slots[0]!.start, d.guestTimezone))})
+  return `<section class="pu-card" aria-label="${label_}">
+  <h2>${escapeHtml(humanDate(d.selectedDate, locale))}</h2>
+  <p class="pu-muted pu-tz-note">
+    ${escapeHtml(t(locale, 'tz.timesShownIn', { tz: tzName(d.guestTimezone), offset: offsetLabel(slots[0]!.start, d.guestTimezone) }))}
   </p>
   <div class="pu-slots">
     ${items}
@@ -632,15 +747,10 @@ export function confirmForm(
   opts: { holdId?: string; errors?: Record<string, string>; values?: Record<string, string> } = {},
 ): string {
   const et = d.eventType
+  const locale = loc(d)
   const errors = opts.errors ?? {}
   const values = opts.values ?? {}
-  const when = formatInZone(start, d.guestTimezone, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })
+  const when = formatWhenLong(locale, start, d.guestTimezone)
 
   const questions = effectiveQuestions(et)
     .map((q) => {
@@ -662,38 +772,54 @@ export function confirmForm(
                    .join('')}
                </select>`
             : `<input id="q-${escapeHtml(q.id)}" name="q_${escapeHtml(q.id)}" value="${val}"${req}${desc}>`
-      return `<label for="q-${escapeHtml(q.id)}">${escapeHtml(q.label)}${q.required ? '' : ' <span class="pu-muted">(optional)</span>'}</label>
+      return `<label for="q-${escapeHtml(q.id)}">${escapeHtml(q.label)}${q.required ? '' : ` <span class="pu-muted">${escapeHtml(t(locale, 'confirm.optional'))}</span>`}</label>
         ${field}
         ${err ? `<p class="pu-err" id="err-${escapeHtml(q.id)}">${escapeHtml(err)}</p>` : ''}`
     })
     .join('\n')
 
-  return `<section class="pu-card" aria-label="Confirm your booking">
-  <h2>Confirm your booking</h2>
+  return `<section class="pu-card" aria-label="${escapeHtml(t(locale, 'confirm.title'))}">
+  <h2>${escapeHtml(t(locale, 'confirm.title'))}</h2>
   <div class="pu-slot-chosen">
     <span class="pu-dot-lg" aria-hidden="true"></span>
     <span><strong class="pu-time">${escapeHtml(when)}</strong><br>
-     <span class="pu-muted">${escapeHtml(d.guestTimezone)} · ${escapeHtml(String(et.durationMinutes))} min</span></span>
+     <span class="pu-muted">${escapeHtml(
+       t(locale, 'confirm.tzLine', {
+         tz: `${tzName(d.guestTimezone)} (${offsetLabel(start, d.guestTimezone)})`,
+         n: et.durationMinutes,
+       }),
+     )}</span></span>
   </div>
   <form method="post" action="${escapeHtml(bookingPath(d))}/confirm">
     <input type="hidden" name="start" value="${start}">
     <input type="hidden" name="tz" value="${escapeHtml(d.guestTimezone)}">
     ${d.embed ? '<input type="hidden" name="embed" value="1">' : ''}
+    ${d.langExplicit ? `<input type="hidden" name="lang" value="${locale}">` : ''}
     ${opts.holdId ? `<input type="hidden" name="hold" value="${escapeHtml(opts.holdId)}">` : ''}
-    <label for="name">Your name</label>
+    <label for="name">${escapeHtml(t(locale, 'confirm.name'))}</label>
     <input id="name" name="name" required aria-required="true" autocomplete="name"
            value="${escapeHtml(values['name'] ?? '')}"
            ${errors['name'] ? 'aria-describedby="err-name"' : ''}>
     ${errors['name'] ? `<p class="pu-err" id="err-name">${escapeHtml(errors['name'])}</p>` : ''}
-    <label for="email">Email</label>
+    <label for="email">${escapeHtml(t(locale, 'confirm.email'))}</label>
     <input id="email" name="email" type="email" required aria-required="true" autocomplete="email"
            value="${escapeHtml(values['email'] ?? '')}"
            ${errors['email'] ? 'aria-describedby="err-email"' : ''}>
     ${errors['email'] ? `<p class="pu-err" id="err-email">${escapeHtml(errors['email'])}</p>` : ''}
     ${questions}
+    <label for="colleagues">${escapeHtml(t(locale, 'confirm.colleagues'))} <span class="pu-muted">${escapeHtml(t(locale, 'confirm.optional'))}</span></label>
+    <input id="colleagues" name="colleagues" type="text" inputmode="email" autocomplete="off" maxlength="400"
+           placeholder="a@example.com, b@example.com"
+           value="${escapeHtml(values['x_colleagues'] ?? '')}"
+           aria-describedby="hint-colleagues${errors['x_colleagues'] ? ' err-colleagues' : ''}">
+    <p class="pu-muted" id="hint-colleagues" style="font-size:.8125rem;margin:.25rem 0 0">${escapeHtml(t(locale, 'confirm.colleaguesHint'))}</p>
+    ${errors['x_colleagues'] ? `<p class="pu-err" id="err-colleagues">${escapeHtml(errors['x_colleagues'])}</p>` : ''}
+    ${errors['captcha'] ? `<p class="pu-err" role="alert">${escapeHtml(errors['captcha'])}</p>` : ''}
+    ${d.turnstileSiteKey ? `<div class="cf-turnstile pu-turnstile" data-sitekey="${escapeHtml(d.turnstileSiteKey)}" data-language="${locale}" data-theme="light"></div>` : ''}
+    <p class="pu-muted" style="font-size:.8125rem;margin:1rem 0 0">${escapeHtml(t(locale, 'confirm.inviteNote'))}</p>
     <div style="margin-top:1.25rem;display:flex;gap:.75rem;flex-wrap:wrap">
-      <button class="pu-btn" type="submit">Confirm booking</button>
-      <a class="pu-btn pu-btn-ghost" href="${escapeHtml(bookingPath(d))}?date=${escapeHtml(localDateString(start, d.guestTimezone))}${d.embed ? '&embed=1' : ''}">Back</a>
+      <button class="pu-btn" type="submit">${escapeHtml(t(locale, 'confirm.submit'))}</button>
+      <a class="pu-btn pu-btn-ghost" href="${escapeHtml(bookingPath(d))}?date=${escapeHtml(localDateString(start, d.guestTimezone))}${d.embed ? '&embed=1' : ''}${langQ(d)}">${escapeHtml(t(locale, 'confirm.back'))}</a>
     </div>
   </form>
 </section>`
@@ -706,31 +832,30 @@ export function bookedConfirmation(opts: {
   guestTimezone: string
   manageUrl: string
   locationLabel?: string
+  locale?: Locale
 }): string {
-  const when = formatInZone(opts.start, opts.guestTimezone, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-  return `<section class="pu-card pu-confirm" aria-label="Booking confirmed">
+  const locale = opts.locale ?? 'en'
+  const when = formatWhenLong(locale, opts.start, opts.guestTimezone)
+  return `<section class="pu-card pu-confirm" aria-label="${escapeHtml(t(locale, 'booked.region'))}">
   <svg class="pu-confirm-icon" width="56" height="56" viewBox="0 0 96 96" aria-hidden="true">
     <path class="pu-ring-arc" d="M 69.2 30.8 A 30 30 0 1 1 26.8 30.8"
       fill="none" stroke-width="9" stroke-linecap="round"></path>
     <circle class="pu-ring-dot" cx="48" cy="22" r="11"></circle>
   </svg>
-  <p><span class="pu-badge">Confirmed</span></p>
-  <h1>You're booked</h1>
-  <p class="pu-muted"><strong style="color:var(--pu-ink-950)">${escapeHtml(opts.eventTitle)}</strong> with ${escapeHtml(opts.hostName)}</p>
+  <p><span class="pu-badge">${escapeHtml(t(locale, 'booked.badge'))}</span></p>
+  <h1>${escapeHtml(t(locale, 'booked.title'))}</h1>
+  <p class="pu-muted">${tHtml(locale, 'booked.with', {
+    event: `<strong style="color:var(--pu-ink-950)">${escapeHtml(opts.eventTitle)}</strong>`,
+    host: escapeHtml(opts.hostName),
+  })}</p>
   <dl class="pu-confirm-details">
-    <div><dt>When</dt><dd class="pu-time">${escapeHtml(when)}<br>
-      <span class="pu-muted">${escapeHtml(opts.guestTimezone)}</span></dd></div>
-    ${opts.locationLabel ? `<div><dt>Where</dt><dd>${escapeHtml(opts.locationLabel)}</dd></div>` : ''}
+    <div><dt>${escapeHtml(t(locale, 'booked.when'))}</dt><dd class="pu-time">${escapeHtml(when)}<br>
+      <span class="pu-muted">${escapeHtml(`${tzName(opts.guestTimezone)} (${offsetLabel(opts.start, opts.guestTimezone)})`)}</span></dd></div>
+    ${opts.locationLabel ? `<div><dt>${escapeHtml(t(locale, 'booked.where'))}</dt><dd>${escapeHtml(opts.locationLabel)}</dd></div>` : ''}
   </dl>
-  <p class="pu-muted">A calendar invitation is on its way to your inbox.</p>
+  <p class="pu-muted">${escapeHtml(t(locale, 'booked.inviteNote'))}</p>
   <p style="margin-top:1.25rem">
-    <a class="pu-btn pu-btn-ghost" href="${escapeHtml(opts.manageUrl)}">Reschedule or cancel</a>
+    <a class="pu-btn pu-btn-ghost" href="${escapeHtml(opts.manageUrl)}">${escapeHtml(t(locale, 'booked.manage'))}</a>
   </p>
 </section>`
 }
@@ -744,13 +869,28 @@ export function bookedConfirmation(opts: {
  * there — not as an error.
  */
 export function slotTakenPage(d: BookingPageData, date: string): string {
-  return `<section class="pu-card" aria-label="Time no longer available">
-  <h1>That time was just taken</h1>
-  <p class="pu-muted">Someone booked it while you were filling in the form. Here are the other times that day.</p>
+  const locale = loc(d)
+  return `<section class="pu-card" aria-label="${escapeHtml(t(locale, 'taken.title'))}">
+  <h1>${escapeHtml(t(locale, 'taken.title'))}</h1>
+  <p class="pu-muted">${escapeHtml(t(locale, 'taken.body'))}</p>
   <p style="margin-top:1rem">
-    <a class="pu-btn" href="${escapeHtml(bookingPath(d))}?date=${escapeHtml(date)}&tz=${encodeURIComponent(d.guestTimezone)}${d.embed ? '&embed=1' : ''}">See available times</a>
+    <a class="pu-btn" href="${escapeHtml(bookingPath(d))}?date=${escapeHtml(date)}&tz=${encodeURIComponent(d.guestTimezone)}${d.embed ? '&embed=1' : ''}${langQ(d)}">${escapeHtml(t(locale, 'taken.cta'))}</a>
   </p>
 </section>`
+}
+
+/**
+ * The "temporarily unavailable" state: the host's calendar could not be read,
+ * so the page cannot promise real availability. The agent that detects it
+ * renders this; the strings live here with the rest of the guest copy.
+ */
+export function calendarUnavailablePage(locale: Locale = 'en'): string {
+  return errorPage(t(locale, 'calendarUnavailable.title'), t(locale, 'calendarUnavailable.body'))
+}
+
+/** An IANA id as a person would say it: `America/New_York` -> `America/New York`. */
+export function tzName(tz: string): string {
+  return tz.replace(/_/g, ' ')
 }
 
 export function errorPage(title: string, message: string): string {
@@ -766,14 +906,8 @@ export function bookingPath(d: { ownerSlug: string; eventType: EventType }): str
   return `/${encodeURIComponent(d.ownerSlug)}/${encodeURIComponent(d.eventType.slug)}`
 }
 
-function humanDate(date: string, _tz: string): string {
-  const [y, m, dd] = date.split('-').map(Number) as [number, number, number]
-  return new Intl.DateTimeFormat('en-US', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    timeZone: 'UTC',
-  }).format(new Date(Date.UTC(y, m - 1, dd)))
+function humanDate(date: string, locale: Locale): string {
+  return formatLocalDate(locale, date)
 }
 
 export function shiftMonth(month: string, delta: number): string {

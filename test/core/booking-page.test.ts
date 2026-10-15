@@ -1,4 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { SWAYQ_SURFACES } from '../../src/swayq-surfaces.js'
+
+// These suites test the upstream avatar rendering, which SwayQ switches off by
+// default (src/swayq-surfaces.ts). They run with the surface on.
+beforeAll(() => {
+  SWAYQ_SURFACES.avatars = true
+})
+afterAll(() => {
+  SWAYQ_SURFACES.avatars = false
+})
 import type { EventType, Slot, User } from '../../src/core/domain/types.js'
 import { eventHeader, hostsRow, joinNames, monthGrid, shellFoot, slotList, type BookingPageData } from '../../src/http/pages/booking.js'
 

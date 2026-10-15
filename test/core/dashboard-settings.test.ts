@@ -1,4 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { SWAYQ_SURFACES } from '../../src/swayq-surfaces.js'
+
+// These suites test the upstream avatar rendering, which SwayQ switches off by
+// default (src/swayq-surfaces.ts). They run with the surface on.
+beforeAll(() => {
+  SWAYQ_SURFACES.avatars = true
+})
+afterAll(() => {
+  SWAYQ_SURFACES.avatars = false
+})
 import type { User } from '../../src/core/domain/types.js'
 import { settingsPage } from '../../src/http/pages/dashboard.js'
 
