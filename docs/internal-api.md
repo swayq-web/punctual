@@ -38,7 +38,7 @@ Secrets and vars on **this** Worker:
 | Name | Required | Meaning |
 |---|---|---|
 | `INTERNAL_SERVICE_TOKEN` | yes | Shared secret the caller passes as `token`. Unset or blank: every call returns `SERVICE_NOT_CONFIGURED`. |
-| `INTERNAL_ALLOWED_DOMAINS` | recommended | Comma list of email domains (e.g. `swayq.com`). When set, the actor and every attendee must also be in one of these domains. |
+| `INTERNAL_ALLOWED_DOMAINS` | **yes** | Comma list of bare email domains (e.g. `swayq.com`). The actor and every attendee must be in one of them, matched exactly (no subdomains). Unset, empty, or ANY malformed entry (`@swayq.com`, `swayq .com`, `*.swayq.com`, a trailing comma, a bare `localhost`) makes every call return `SERVICE_NOT_CONFIGURED`. |
 
 ## Security model
 
@@ -48,18 +48,25 @@ Secrets and vars on **this** Worker:
    workers test requests plausible paths (`/findTime`,
    `/api/internal/findTime`, `/InternalApi/findTime`, ...) and asserts 404.
 2. **Defense in depth: the shared token.** Checked first, in constant time
-   (SHA-256 both sides, XOR compare), before the engine is even built. It
-   turns a mistaken binding (another Worker in the account) into a refusal
-   rather than full staff-calendar access. An unset secret refuses
-   everything; there is no "no secret means open" mode.
+   (SHA-256 both sides, then every digest byte compared), before the engine
+   is even built. It turns a mistaken binding (another Worker in the
+   account) into a refusal rather than full staff-calendar access. An unset
+   secret refuses everything; there is no "no secret means open" mode. The
+   token and domain gate run in a module function, not a class member:
+   every member of a `WorkerEntrypoint`, TypeScript `private` included, is
+   callable over RPC, so the class carries only the six public methods (a
+   workers test pins the prototype).
 3. **Acting user.** `actingUserEmail` is trimmed and lowercased, then must be
-   an existing Punctual user (and inside `INTERNAL_ALLOWED_DOMAINS` when set).
-   Punctual has no disabled flag: removing a user from the instance is how a
-   user is deactivated. Anything else is `UNKNOWN_ACTOR`. The caller (SwayQ)
-   is trusted to have authenticated the human; this API trusts the
-   service binding + token for that assertion.
+   in `INTERNAL_ALLOWED_DOMAINS` AND an existing Punctual user. Punctual has
+   no disabled flag: removing a user from the instance is how a user is
+   deactivated. Anything else is `UNKNOWN_ACTOR`. The caller (SwayQ) is
+   trusted to have authenticated the human; this API trusts the service
+   binding + token for that assertion.
 4. **Attendee guard (the critical invariant).** Every attendee email must be
-   an existing Punctual user (and in the allowed domains). One outsider
+   in `INTERNAL_ALLOWED_DOMAINS` AND an existing Punctual user. The domain
+   gate is required because Punctual signups are open by default and an
+   admin can change the policy at runtime, so "has an account" alone would
+   let anyone who signs up be invited. One outsider
    refuses the WHOLE request with `EXTERNAL_ATTENDEE`, listing every
    offending address. Nothing is read or sent for anyone. Emails are
    normalized and de-duplicated first; the actor is always a participant and
@@ -79,8 +86,18 @@ Secrets and vars on **this** Worker:
    on the organizer's copy, so reschedule and cancel look the event up on
    the ACTOR's own write calendar and refuse (`NOT_OWNER`) unless both keys
    match the actor. Another user's event is simply not on that calendar
-   (`NOT_FOUND`).
-7. **No leakage.** Every method returns a typed union and never throws
+   (`NOT_FOUND`). The marker grants no escalation: private extended
+   properties on a calendar can only be written by someone with write
+   access to that calendar, i.e. the actor themselves (or a delegate they
+   granted), so planting a marker on the actor's calendar already requires
+   the access the marker would protect.
+7. **Idempotency keys are scoped to the actor** (the Google id is derived
+   from `swayq-internal:<actorUserId>:<key>`), and a replay is refused
+   unless the existing event carries the marker naming the actor. Callers
+   MUST derive the key from the request (e.g. a hash of the MCP request id
+   plus its arguments), never mint a fresh one per call: a per-call key
+   turns every retry into a duplicate invitation.
+8. **No leakage.** Every method returns a typed union and never throws
    across the RPC boundary. Errors never carry tokens, raw provider bodies,
    or other users' event data; logs carry the method and the error NAME
    only.
@@ -129,8 +146,8 @@ class InternalApi extends WorkerEntrypoint<InternalEnv> {
     end: string
     timezone: string
     title: string                     // 1..200
-    description?: string              // <= 8000
-    idempotencyKey: string            // 8..200, caller-chosen
+    description?: string              // <= 2000; a fixed footer line is appended
+    idempotencyKey: string            // 8..200, derived from the request (see 7.)
   }): Promise<InternalResult<{
     eventId: string
     htmlLink: string | null
@@ -180,7 +197,11 @@ class InternalApi extends WorkerEntrypoint<InternalEnv> {
     token: string
     actingUserEmail: string
     eventId: string
-  }): Promise<InternalResult<{ eventId: string; cancelled: boolean }>> // false = already gone
+  }): Promise<InternalResult<{
+    eventId: string
+    cancelled: boolean                // false = already gone
+    notified: string[]                // who Google sent the cancellation to
+  }>>
 
   myBookingLinks(input: {
     token: string
@@ -204,7 +225,9 @@ class InternalApi extends WorkerEntrypoint<InternalEnv> {
 - **createMeeting** writes to the actor's Google write calendar
   (`calendarIdWrite` of an `ok` Google connection) with
   `conferenceDataVersion=1`, a Meet `createRequest`, `sendUpdates=all`, and
-  attendees = actor + others. The Google event id is derived from
+  attendees = actor + others. The description is the caller's text (at most
+  2000 chars) followed by the fixed line `Created by the SwayQ assistant
+  for <actor email>.`, so every invite says who asked for it. The Google event id is derived from
   `swayq-internal:<actorUserId>:<idempotencyKey>` (same derivation as
   booking sync, `adapters/calendar-ids.ts`), so:
   - a retry finds the existing event BEFORE the busy re-check (the first
@@ -221,12 +244,22 @@ class InternalApi extends WorkerEntrypoint<InternalEnv> {
   marker, so this is "meetings I organized".
 - **rescheduleMeeting** PATCHes start/end only (`sendUpdates=all`, no
   `createRequest`, so the existing Meet link stays). The busy re-check
-  ignores the meeting's own current slot, so nudging it by 15 minutes does
-  not collide with itself.
+  ignores the meeting's own current slot for the organizer and for every
+  attendee who has not declined it (their freeBusy includes this meeting);
+  for a DECLINED attendee nothing is ignored, since their busy time in the
+  old slot is some other commitment. Residual: for a non-declined attendee,
+  a different meeting overlapping exactly the old slot is masked. The PATCH
+  carries `If-Match: <etag>` from the read; if the event changed in between
+  (Google 412), nothing is moved, the guards are re-run on the event as it
+  is now (so an outsider added meanwhile is `EXTERNAL_ATTENDEE`), and
+  otherwise the result is `CONCURRENT_MODIFICATION`: re-read and retry.
 - **cancelMeeting** DELETEs with `sendUpdates=all`; 404/410 or an already
-  cancelled event returns `cancelled: false`. Cancel does not re-apply the
-  attendee guard: a cancellation to a hand-added guest is harmless and
-  refusing it would strand the meeting.
+  cancelled event returns `cancelled: false, notified: []`. Cancel does NOT
+  re-apply the attendee guard: a guest someone added by hand in Google,
+  external or not, receives the cancellation. That is a cancellation, never
+  an invitation, and refusing it would strand the meeting. `notified` lists
+  every address Google sent it to (all attendees except the organizer), so
+  the assistant can tell the user, including about any hand-added guest.
 - **myBookingLinks** returns the actor's active personal event types as
   `BASE_URL/{userSlug}/{eventSlug}` (team event types are excluded).
 
@@ -246,6 +279,7 @@ class InternalApi extends WorkerEntrypoint<InternalEnv> {
 | `SLOT_BUSY` | a participant is busy in the requested slot | `busyEmails` |
 | `NOT_FOUND` | no such (non-cancelled) event on the actor's write calendar | |
 | `NOT_OWNER` | event lacks the marker or names another organizer | |
+| `CONCURRENT_MODIFICATION` | reschedule: the event changed between read and write (412); nothing was changed | |
 | `IDEMPOTENCY_CONFLICT` | key reused for a different time / cancelled / foreign event | |
 | `PROVIDER_ERROR` | Google refused or failed (incl. a grant needing reconnect) | |
 | `INTERNAL_ERROR` | anything else (engine misconfigured, D1 failure) | |
@@ -254,8 +288,9 @@ class InternalApi extends WorkerEntrypoint<InternalEnv> {
 
 - Writes are Google-only. A staff member whose write calendar is Microsoft
   gets `UNSUPPORTED_PROVIDER`; their busy time is still read for others.
-- "Active user" is "exists in `users`". If signups are open
-  (`SIGNUPS` unset), anyone can become a user, so set
-  `INTERNAL_ALLOWED_DOMAINS` (or a closed / allowlisted `SIGNUPS`) on any
-  deployment that exposes this API.
+- "Active user" is "exists in `users`" (Punctual has no disabled flag);
+  the required domain gate is what keeps self-signups out.
+- No rate limiting on the entrypoint yet (follow-up). The caller is a
+  single trusted Worker; a runaway caller is bounded by Google's own quotas
+  per staff connection.
 - `listMyMeetings` reads at most 5 pages of 250 events.
