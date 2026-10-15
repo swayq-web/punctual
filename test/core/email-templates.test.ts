@@ -210,9 +210,9 @@ describe('email-client safety', () => {
 
   it('paints the brand colours', () => {
     const html = bookingConfirmationForGuest(ctx()).html
-    expect(html).toContain('#0E7C4C') // meridian green CTA
-    expect(html).toContain('#FAFAF7') // paper
-    expect(html).toContain('#0F1512') // ink
+    expect(html).toContain('#DBED72') // Learning Lime CTA fill
+    expect(html).toContain('#F8F7F5') // sand paper
+    expect(html).toContain('#0E0E0E') // carbon ink
   })
 
   it('declares an explicit charset, so an en dash never turns to mojibake', () => {
@@ -245,16 +245,13 @@ describe('host photo', () => {
     expect(html).not.toContain('<img')
   })
 
-  it('renders an absolute /avatars/:key URL, empty alt, when both are present', () => {
+  it('never renders a host photo in the guest note — SwayQ switches the avatar surface off', () => {
     const key = 'a'.repeat(64) + '-thumb.webp'
     const html = bookingConfirmationForGuest(
       ctx({ host: { ...host, avatarKey: key }, baseUrl: 'https://punctual.example/' }),
     ).html
-    expect(html).toContain(`<img src="https://punctual.example/avatars/${key}"`)
-    // Empty, not the host's name: the "Host" row already says it, and a
-    // client that fails to load the image renders a broken-image icon with
-    // the alt text spilling out next to it when alt is non-empty.
-    expect(html).toContain(`alt=""`)
+    expect(html).not.toContain('<img')
+    expect(html).not.toContain('/avatars/')
   })
 
   it('every fact in the email is still plain text — the photo is decorative, not load-bearing', () => {
@@ -357,8 +354,11 @@ describe('lifecycle templates', () => {
     })
     expect(mail.subject.startsWith('Rescheduled:')).toBe(true)
     expect(mail.text).toContain('Previously')
-    expect(mail.text).toContain(formatWhen(START, START + 30 * 60_000, 'Europe/Kyiv'))
-    expect(mail.text).toContain(formatWhen(moved.startUtc, moved.endUtc, 'Europe/Kyiv'))
+    // The guest note names the zone, not just its offset.
+    const oldTime = formatWhen(START, START + 30 * 60_000, 'Europe/Kyiv').replace(/\(GMT/, '(Europe/Kyiv, GMT')
+    const newTime = formatWhen(moved.startUtc, moved.endUtc, 'Europe/Kyiv').replace(/\(GMT/, '(Europe/Kyiv, GMT')
+    expect(mail.text).toContain(oldTime)
+    expect(mail.text).toContain(newTime)
     // ADR-0005 §4: the old links are dead, and the guest is told so.
     expect(mail.text).toContain('no longer work')
   })
@@ -375,7 +375,7 @@ describe('lifecycle templates', () => {
     expect(mail.text).toContain('Grace Hopper cancelled')
     expect(mail.text).toContain('Travelling')
     expect(mail.text).toContain('https://punctual.example/grace/intro')
-    expect(mail.html).toContain('#D92D20')
+    expect(mail.html).toContain('#A32116')
   })
 
   // A note is a message from a person, quoted as one — not a "Reason" row
@@ -392,7 +392,7 @@ describe('lifecycle templates', () => {
       cancelledByName: 'Bob Builder',
       reason: 'Something came up.',
     })
-    expect(mail.text).toContain('Bob Builder cancelled Intro call and wrote: “Something came up.” It has been removed from the calendar.')
+    expect(mail.text).toContain('Bob Builder cancelled Intro call and wrote: “Something came up.”')
     expect(mail.text).not.toContain('Grace Hopper cancelled')
     expect(mail.text).not.toContain('Reason')
     expect(mail.html).toContain('wrote: “Something came up.”')

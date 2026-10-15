@@ -27,11 +27,19 @@ import type { Booking, EventType, User } from './domain/types.js'
 import { answeredQuestions } from './domain/booking-service.js'
 import { describeLocation } from './ics.js'
 import { formatInZone, offsetLabel } from './time/zone.js'
+import { intlTag, t, type Locale, type MessageKey } from './i18n/index.js'
 
 export interface EmailContent {
   subject: string
   html: string
   text: string
+  /**
+   * Where a reply should go. Set on guest mail to the host's address: the
+   * Worker's sender is a no-reply identity, and a guest who answers a
+   * confirmation is writing to the person they booked. The sender wiring
+   * (notify.ts) copies it onto the queued message's `replyTo`.
+   */
+  replyTo?: string
 }
 
 export type EmailAudience = 'guest' | 'host'
@@ -67,20 +75,33 @@ export interface BookingEmailContext {
    * still gets sent without one, and the copy must not claim otherwise.
    */
   hasAttachment?: boolean
+  /**
+   * The language of GUEST mail (`bookings.guest_locale`, wired by the caller).
+   * Host-facing mail ignores it: the dashboard and its mail stay English.
+   */
+  locale?: Locale
+  /**
+   * Host mail only: when the same guest already has an upcoming booking with
+   * this host (`findOtherUpcomingGuestBooking`), the host is told in the intro.
+   */
+  priorBookingStartUtc?: number
 }
 
-// Brand palette. Inline hex rather than tokens: email has no cascade and no
-// custom properties, so every colour has to travel with the element.
-const INK = '#0F1512'
-const MUTED = '#5C6660'
-const PAPER = '#FAFAF7'
-const PAPER_DIM = '#F0F1EC'
-const LINE = '#E3E5DE'
-const MERIDIAN = '#0E7C4C'
-const DANGER = '#D92D20'
+// Brand palette (swayq-2026 light tokens). Inline hex rather than tokens:
+// email has no cascade and no custom properties, so every colour has to
+// travel with the element. Learning Lime is a fill behind carbon ink, never
+// text; the wordmark period is the same colour as the letters.
+const INK = '#0E0E0E'
+const MUTED = '#4A4A4A'
+const PAPER = '#F8F7F5'
+const PAPER_DIM = '#EEECE7'
+const LINE = '#D9D9D6'
+const LIME = '#DBED72'
+const MERIDIAN = INK // link colour: carbon, underlined
+const DANGER = '#A32116'
 
-const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Helvetica,Arial,sans-serif"
-const MONO = "ui-monospace,SFMono-Regular,Menlo,'IBM Plex Mono',monospace"
+const FONT = "Poppins,-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Helvetica,Arial,sans-serif"
+const MONO = FONT
 
 // ---------------------------------------------------------------------------
 // Escaping
@@ -128,16 +149,26 @@ function safeUrl(url: string): string | null {
  * has two offsets and no honest single label; the start is the one the reader
  * needs in order to be on time.
  */
-export function formatWhen(startUtc: number, endUtc: number, tz: string): string {
-  const date = formatInZone(startUtc, tz, { dateStyle: 'full' })
-  const from = formatInZone(startUtc, tz, { timeStyle: 'short' })
-  const to = formatInZone(endUtc, tz, { timeStyle: 'short' })
+export function formatWhen(startUtc: number, endUtc: number, tz: string, locale: Locale = 'en'): string {
+  const lt = intlTag(locale)
+  const date = formatInZone(startUtc, tz, { dateStyle: 'full' }, lt)
+  const from = formatInZone(startUtc, tz, { timeStyle: 'short' }, lt)
+  const to = formatInZone(endUtc, tz, { timeStyle: 'short' }, lt)
   return `${date}, ${from} – ${to} (${offsetLabel(startUtc, tz)})`
 }
 
+/** Guest wording: the same, with the zone NAMED, not just offset: `(Europe/Copenhagen, GMT+2)`. */
+function formatWhenForGuest(startUtc: number, endUtc: number, tz: string, locale: Locale): string {
+  const lt = intlTag(locale)
+  const date = formatInZone(startUtc, tz, { dateStyle: 'full' }, lt)
+  const from = formatInZone(startUtc, tz, { timeStyle: 'short' }, lt)
+  const to = formatInZone(endUtc, tz, { timeStyle: 'short' }, lt)
+  return `${date}, ${from} – ${to} (${tz.replace(/_/g, ' ')}, ${offsetLabel(startUtc, tz)})`
+}
+
 /** Compact form for subject lines, where the full date eats the preview pane. */
-function formatWhenShort(startUtc: number, tz: string): string {
-  return `${formatInZone(startUtc, tz, { dateStyle: 'medium', timeStyle: 'short' })} (${offsetLabel(startUtc, tz)})`
+function formatWhenShort(startUtc: number, tz: string, locale: Locale = 'en'): string {
+  return `${formatInZone(startUtc, tz, { dateStyle: 'medium', timeStyle: 'short' }, intlTag(locale))} (${offsetLabel(startUtc, tz)})`
 }
 
 /** The zone the recipient reads in — the whole point of the audience argument. */
@@ -186,6 +217,9 @@ interface ShellInput {
    */
   avatarUrl?: string
   avatarAlt?: string
+  /** `<html lang>` and the "Sent by" footer. Defaults to English. */
+  locale?: Locale
+  replyTo?: string
 }
 
 function detailRowHtml(row: DetailRow): string {
@@ -204,6 +238,10 @@ function detailRowHtml(row: DetailRow): string {
   )
 }
 
+function onAccent(accent: string): string {
+  return accent === LIME ? INK : '#FFFFFF'
+}
+
 function ctaHtml(cta: Cta, accent: string): string {
   const href = safeUrl(cta.url)
   if (!href) return ''
@@ -215,13 +253,14 @@ function ctaHtml(cta: Cta, accent: string): string {
   return (
     `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px 0;">` +
     `<tr><td bgcolor="${accent}" style="border-radius:10px;">` +
-    `<a href="${escapeHtml(href)}" style="display:inline-block;padding:12px 22px;font-family:${FONT};font-size:15px;font-weight:600;color:#FFFFFF;text-decoration:none;border-radius:10px;">${escapeHtml(cta.label)}</a>` +
+    `<a href="${escapeHtml(href)}" style="display:inline-block;padding:12px 22px;font-family:${FONT};font-size:15px;font-weight:600;color:${onAccent(accent)};text-decoration:none;border-radius:10px;">${escapeHtml(cta.label)}</a>` +
     `</td></tr></table>`
   )
 }
 
 function shell(input: ShellInput): string {
-  const accent = input.accent ?? MERIDIAN
+  const accent = input.accent ?? LIME
+  const locale = input.locale ?? 'en'
   const rows = input.rows.map(detailRowHtml).join('')
   const primary = input.ctas.filter((c) => c.primary).map((c) => ctaHtml(c, accent)).join('')
   const secondary = input.ctas.filter((c) => !c.primary).map((c) => ctaHtml(c, accent)).join('')
@@ -240,7 +279,7 @@ function shell(input: ShellInput): string {
     // schemes` are the one dark-mode hook that survives clients stripping
     // `<style>` blocks — they ask Apple Mail/Outlook.com to leave this light
     // design alone instead of auto-inverting it into unreadable pairings.
-    `<!doctype html><html lang="en"><head>` +
+    `<!doctype html><html lang="${locale}"><head>` +
     `<meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width,initial-scale=1">` +
     `<meta http-equiv="X-UA-Compatible" content="IE=edge">` +
@@ -256,7 +295,7 @@ function shell(input: ShellInput): string {
     // Wordmark as text, not an image: images are blocked by default in Outlook
     // and Gmail, and a confirmation must not open on a broken placeholder.
     `<tr><td style="padding:24px 28px 8px 28px;font-family:${MONO};font-size:16px;font-weight:600;letter-spacing:-0.02em;color:${INK};">` +
-    `${escapeHtml(input.brandName.toLowerCase())}<span style="color:${accent};">:</span>` +
+    `${escapeHtml(input.brandName.toLowerCase().replace(/\s+/g, ''))}<span>.</span>` +
     `</td></tr>` +
     // The host photo, unlike the wordmark above: optional, decorative, an
     // <img> with real alt text. If it fails to load the row still reserves
@@ -283,7 +322,7 @@ function shell(input: ShellInput): string {
       ? `<tr><td style="padding:22px 28px 24px 28px;border-top:1px solid ${LINE};">${notes}</td></tr>`
       : `<tr><td style="padding:24px;"></td></tr>`) +
     `</table>` +
-    `<div style="font-family:${FONT};font-size:11px;line-height:18px;color:${MUTED};padding:14px 8px 0 8px;">Sent by ${escapeHtml(input.brandName)}</div>` +
+    `<div style="font-family:${FONT};font-size:11px;line-height:18px;color:${MUTED};padding:14px 8px 0 8px;">${escapeHtml(t(locale, 'email.sentBy', { brand: input.brandName }))}</div>` +
     `</td></tr></table>` +
     `</body></html>`
   )
@@ -314,7 +353,12 @@ function plain(input: ShellInput): string {
 }
 
 function render(input: ShellInput, subject: string): EmailContent {
-  return { subject: sanitizeHeader(subject), html: shell(input), text: plain(input) }
+  return {
+    subject: sanitizeHeader(subject),
+    html: shell(input),
+    text: plain(input),
+    ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -391,10 +435,46 @@ function brandOf(ctx: BookingEmailContext): string {
   return ctx.brandName ?? 'Punctual'
 }
 
-/** Absolute `/avatars/:key` URL for the primary host's photo, or `undefined` — same "no photo" degrade as everywhere else. */
-function hostAvatarUrl(ctx: BookingEmailContext): string | undefined {
-  if (!ctx.host.avatarKey || !ctx.baseUrl) return undefined
-  return `${ctx.baseUrl.replace(/\/$/, '')}/avatars/${ctx.host.avatarKey}`
+const guestLocale = (ctx: BookingEmailContext): Locale => ctx.locale ?? 'en'
+
+/**
+ * The management links, as the short guest notes carry them. The invitation
+ * itself comes from Google (sendUpdates=all), so this mail says what was
+ * booked and how to change it, and nothing more.
+ */
+function guestCtas(ctx: BookingEmailContext, locale: Locale): Cta[] {
+  const ctas: Cta[] = []
+  if (ctx.rescheduleUrl) ctas.push({ label: t(locale, 'email.cta.reschedule'), url: ctx.rescheduleUrl, primary: true })
+  if (ctx.cancelUrl) ctas.push({ label: t(locale, 'email.cta.cancel'), url: ctx.cancelUrl })
+  return ctas
+}
+
+/** What was booked: title, host, and the time in the GUEST's zone, with the zone named. */
+function guestRows(ctx: BookingEmailContext, locale: Locale): DetailRow[] {
+  return [
+    { label: t(locale, 'email.row.what'), value: ctx.eventType.title },
+    { label: t(locale, 'email.row.host'), value: hostNamesWithCompany(ctx) },
+    {
+      label: t(locale, 'email.row.when'),
+      value: formatWhenForGuest(ctx.booking.startUtc, ctx.booking.endUtc, ctx.booking.guestTimezone, locale),
+    },
+    // Where it happens still belongs in the note: the Meet link only exists
+    // once the calendar sync has run, and a phone number or an address never
+    // comes from Google.
+    { label: t(locale, 'email.row.where'), value: describeLocation(ctx.eventType, ctx.booking.conferenceUrl) },
+  ]
+}
+
+/** Replies reach the host, not a no-reply sender. */
+function hostReplyTo(ctx: BookingEmailContext): { replyTo?: string } {
+  return ctx.host.email ? { replyTo: ctx.host.email } : {}
+}
+
+function guestNotes(ctx: BookingEmailContext, locale: Locale, invitationKey: MessageKey): string[] {
+  return [
+    t(locale, invitationKey),
+    t(locale, 'email.replyNote', { host: hostNames(ctx) }),
+  ]
 }
 
 // ---------------------------------------------------------------------------
@@ -402,31 +482,30 @@ function hostAvatarUrl(ctx: BookingEmailContext): string | undefined {
 // ---------------------------------------------------------------------------
 
 export function bookingConfirmationForGuest(ctx: BookingEmailContext): EmailContent {
+  // A short note: the calendar invitation is Google's. This mail is the
+  // record of what was booked plus the two management links, in the guest's
+  // language, replying to the host.
   const tz = zoneFor(ctx, 'guest')
-  const brandName = brandOf(ctx)
+  const locale = guestLocale(ctx)
+  const host = hostNames(ctx)
   const input: ShellInput = {
-    brandName,
-    preheader: `${ctx.eventType.title} — ${formatWhenShort(ctx.booking.startUtc, tz)}`,
-    heading: 'Your meeting is confirmed',
-    intro:
-      ctx.hasAttachment === false
-        ? `${ctx.booking.guestName}, you are booked with ${hostNames(ctx)}.`
-        : `${ctx.booking.guestName}, you are booked with ${hostNames(ctx)}. The invite is attached, so it lands in your calendar with one tap.`,
-    rows: baseRows(ctx, 'guest', tz),
-    ctas: manageCtas(ctx, 'guest'),
-    notes: [tzNote(tz, ctx.booking.startUtc), ...supportNote(ctx)],
-    avatarUrl: hostAvatarUrl(ctx),
-    // Empty, not the host's name: the "Host" row two lines down already says
-    // it, and a client that fails to load the image (a stale key, a blocked-
-    // images policy — common in corporate Outlook) renders a broken-image
-    // icon with the alt text spilling out next to it, not the clean "no
-    // visible artifact" degradation the row above promises. A purely
-    // decorative image takes an empty alt on accessibility grounds too.
-    avatarAlt: '',
+    brandName: brandOf(ctx),
+    locale,
+    preheader: `${ctx.eventType.title} · ${formatWhenShort(ctx.booking.startUtc, tz, locale)}`,
+    heading: t(locale, 'email.confirmed.heading'),
+    intro: t(locale, 'email.confirmed.intro', { guest: ctx.booking.guestName, host }),
+    rows: guestRows(ctx, locale),
+    ctas: guestCtas(ctx, locale),
+    notes: guestNotes(ctx, locale, 'email.invitationNote'),
+    ...hostReplyTo(ctx),
   }
   return render(
     input,
-    `Confirmed: ${ctx.eventType.title} with ${hostNames(ctx)} — ${formatWhenShort(ctx.booking.startUtc, tz)}`,
+    t(locale, 'email.confirmed.subject', {
+      event: ctx.eventType.title,
+      host,
+      when: formatWhenShort(ctx.booking.startUtc, tz, locale),
+    }),
   )
 }
 
@@ -444,9 +523,14 @@ export function bookingConfirmationForHost(ctx: BookingEmailContext): EmailConte
     // failed to generate, is dropped before the email is (notify.ts) — this
     // copy must not claim an attachment that was never actually sent.
     intro:
-      ctx.hasAttachment === false
+      (ctx.hasAttachment === false
         ? `${ctx.booking.guestName} booked ${ctx.eventType.title}. It is already on your calendar.`
-        : `${ctx.booking.guestName} booked ${ctx.eventType.title}. It is already on your calendar — the invite is attached too, in case you need it elsewhere.`,
+        : `${ctx.booking.guestName} booked ${ctx.eventType.title}. It is already on your calendar — the invite is attached too, in case you need it elsewhere.`) +
+      (ctx.priorBookingStartUtc !== undefined
+        ? ` ${t('en', 'email.host.priorBooking', {
+            date: formatInZone(ctx.priorBookingStartUtc, tz, { dateStyle: 'full' }),
+          })}`
+        : ''),
     rows: baseRows(ctx, 'host', tz),
     ctas: manageCtas(ctx, 'host'),
     notes: [tzNote(tz, ctx.booking.startUtc)],
@@ -469,6 +553,10 @@ export interface RescheduleEmailContext extends BookingEmailContext {
  * and the new meeting.
  */
 export function bookingRescheduled(ctx: RescheduleEmailContext): EmailContent {
+  return ctx.audience === 'guest' ? rescheduledForGuest(ctx) : rescheduledForHost(ctx)
+}
+
+function rescheduledForHost(ctx: RescheduleEmailContext): EmailContent {
   const tz = zoneFor(ctx, ctx.audience)
   const brandName = brandOf(ctx)
   const rows = baseRows(ctx, ctx.audience, tz)
@@ -506,6 +594,40 @@ export function bookingRescheduled(ctx: RescheduleEmailContext): EmailContent {
   return render(input, `Rescheduled: ${ctx.eventType.title} — ${formatWhenShort(ctx.booking.startUtc, tz)}`)
 }
 
+function rescheduledForGuest(ctx: RescheduleEmailContext): EmailContent {
+  const tz = zoneFor(ctx, 'guest')
+  const locale = guestLocale(ctx)
+  const host = hostNames(ctx)
+  const rows = guestRows(ctx, locale)
+  // The old time sits directly under the new one, struck through.
+  rows.splice(3, 0, {
+    label: t(locale, 'email.row.previously'),
+    value: formatWhenForGuest(ctx.previous.startUtc, ctx.previous.endUtc, tz, locale),
+    strike: true,
+  })
+  const input: ShellInput = {
+    brandName: brandOf(ctx),
+    locale,
+    preheader: formatWhenShort(ctx.booking.startUtc, tz, locale),
+    heading: t(locale, 'email.rescheduled.heading'),
+    intro: t(locale, 'email.rescheduled.intro', { guest: ctx.booking.guestName, host }),
+    rows,
+    ctas: guestCtas(ctx, locale),
+    // ADR-0005 §4: rescheduling rotates the manage token, so links in the
+    // superseded confirmation are dead. Saying so prevents a support ticket.
+    notes: [...guestNotes(ctx, locale, 'email.updatedInvitationNote'), t(locale, 'email.oldLinks')],
+    ...hostReplyTo(ctx),
+  }
+  return render(
+    input,
+    t(locale, 'email.rescheduled.subject', {
+      event: ctx.eventType.title,
+      host,
+      when: formatWhenShort(ctx.booking.startUtc, tz, locale),
+    }),
+  )
+}
+
 export interface CancellationEmailContext extends BookingEmailContext {
   audience: EmailAudience
   cancelledBy?: EmailAudience
@@ -516,7 +638,47 @@ export interface CancellationEmailContext extends BookingEmailContext {
   rebookUrl?: string
 }
 
+function cancelledForGuest(ctx: CancellationEmailContext): EmailContent {
+  const tz = zoneFor(ctx, 'guest')
+  const locale = guestLocale(ctx)
+  const host = hostNames(ctx)
+  const reason = ctx.reason?.trim() ?? ''
+  const by =
+    ctx.cancelledBy === 'host'
+      ? ctx.cancelledByName ?? host
+      : ctx.cancelledBy === 'guest'
+        ? ctx.booking.guestName
+        : null
+  const rows = guestRows(ctx, locale)
+  if (reason !== '' && !by) rows.push({ label: t(locale, 'email.row.reason'), value: reason })
+  const event = ctx.eventType.title
+  const intro = by
+    ? reason !== ''
+      ? t(locale, 'email.cancelled.byWithReason', { by, event, reason })
+      : t(locale, 'email.cancelled.by', { by, event })
+    : t(locale, 'email.cancelled.plain', { event })
+  const input: ShellInput = {
+    brandName: brandOf(ctx),
+    locale,
+    // Red only as the accent, and only here: cancellation is the one state
+    // where "lime means go" must not apply.
+    accent: DANGER,
+    preheader: `${event} · ${formatWhenShort(ctx.booking.startUtc, tz, locale)}`,
+    heading: t(locale, 'email.cancelled.heading'),
+    intro,
+    rows,
+    ctas: ctx.rebookUrl ? [{ label: t(locale, 'email.cta.bookAgain'), url: ctx.rebookUrl, primary: true }] : [],
+    notes: [t(locale, 'email.replyNote', { host })],
+    ...hostReplyTo(ctx),
+  }
+  return render(input, t(locale, 'email.cancelled.subject', { event, host }))
+}
+
 export function bookingCancelled(ctx: CancellationEmailContext): EmailContent {
+  return ctx.audience === 'guest' ? cancelledForGuest(ctx) : cancelledForHost(ctx)
+}
+
+function cancelledForHost(ctx: CancellationEmailContext): EmailContent {
   const tz = zoneFor(ctx, ctx.audience)
   const brandName = brandOf(ctx)
   const rows = baseRows(ctx, ctx.audience, tz)
@@ -558,7 +720,32 @@ export interface ReminderEmailContext extends BookingEmailContext {
   when: '24h' | '1h'
 }
 
+function reminderForGuest(ctx: ReminderEmailContext): EmailContent {
+  const tz = zoneFor(ctx, 'guest')
+  const locale = guestLocale(ctx)
+  const host = hostNames(ctx)
+  const event = ctx.eventType.title
+  const n = ctx.when === '24h' ? '24' : '1'
+  const when = formatWhenShort(ctx.booking.startUtc, tz, locale)
+  const input: ShellInput = {
+    brandName: brandOf(ctx),
+    locale,
+    preheader: `${event} · ${when}`,
+    heading: t(locale, `email.reminder.heading${n}` as MessageKey),
+    intro: t(locale, `email.reminder.intro${n}` as MessageKey, { event, host }),
+    rows: guestRows(ctx, locale),
+    ctas: guestCtas(ctx, locale),
+    notes: [t(locale, 'email.replyNote', { host })],
+    ...hostReplyTo(ctx),
+  }
+  return render(input, t(locale, `email.reminder.subject${n}` as MessageKey, { event, when }))
+}
+
 export function bookingReminder(ctx: ReminderEmailContext): EmailContent {
+  return ctx.audience === 'guest' ? reminderForGuest(ctx) : reminderForHost(ctx)
+}
+
+function reminderForHost(ctx: ReminderEmailContext): EmailContent {
   const tz = zoneFor(ctx, ctx.audience)
   const brandName = brandOf(ctx)
   const lead = ctx.when === '24h' ? 'tomorrow' : 'in an hour'
