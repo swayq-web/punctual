@@ -1,6 +1,6 @@
 /**
- * Tell the host (every host on the booking) and the instance admins that a
- * booking's calendar events failed to sync or drifted.
+ * Tell the hosts (every host on the booking) that a booking's calendar
+ * events failed to sync or drifted, and the instance admins about failures.
  *
  * Never the guest: what went wrong on a host's calendar is internal. The
  * guest learns only what to do, on the manage page (core/domain/calendar-sync.ts).
@@ -38,8 +38,12 @@ export async function alertCalendarSync(
     const u = await repos.users.byId(id)
     if (u?.email) recipients.set(u.email.toLowerCase(), u)
   }
-  for (const u of await repos.users.listAll()) {
-    if (u.role === 'admin' && u.email) recipients.set(u.email.toLowerCase(), u)
+  // A failure is the instance's problem too (a revoked app, a disabled API);
+  // a drift is the host's own calendar edit, so only the hosts hear of it.
+  if (alert.kind === 'failed') {
+    for (const u of await repos.users.listAll()) {
+      if (u.role === 'admin' && u.email) recipients.set(u.email.toLowerCase(), u)
+    }
   }
 
   for (const user of recipients.values()) {

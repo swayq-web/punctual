@@ -1,5 +1,6 @@
 /**
- * Cron work: reminders, hold expiry, lock pruning, telemetry.
+ * Cron work: reminders, hold expiry, lock pruning, digests, the calendar
+ * sync reconciler, telemetry.
  *
  * Runs every 5 minutes. Each task is independent and failure-isolated —
  * a telemetry ping that cannot reach the internet must not stop reminders
@@ -8,6 +9,8 @@
 
 import type { EnginePorts } from '../ports.js'
 import type { Booking, EventType, User } from '../core/domain/types.js'
+import { classifyCalendarError, isCalendarSyncRetry, logSync } from './calendar-sync-errors.js'
+import { alertCalendarSync } from './calendar-sync-alerts.js'
 
 const MINUTE = 60_000
 const HOUR = 3_600_000
@@ -19,6 +22,7 @@ export async function runScheduledTasks(ports: EnginePorts, now: number): Promis
     ['prune-locks', pruneLocks(ports, now)],
     ['reminders', sendReminders(ports, now)],
     ['digests', sendDigests(ports, now)],
+    ['calendar-reconcile', reconcileCalendarSync(ports, now)],
   ]
   if (ports.config.telemetryEnabled) tasks.push(['telemetry', sendTelemetry(ports, now)])
 
@@ -148,6 +152,140 @@ export async function sendDigests(ports: EnginePorts, now: number): Promise<void
       dashboardUrl: `${ports.config.baseUrl.replace(/\/$/, '')}/dashboard`,
     })
     await ports.queue.send({ kind: 'email', message: { to: host.email, toName: host.name, subject: mail.subject, html: mail.html, text: mail.text } })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Calendar sync reconciler (SWA-1286)
+// ---------------------------------------------------------------------------
+
+/** A create sync that has not landed after this long is presumed lost. */
+export const STUCK_SYNC_AFTER = 10 * MINUTE
+/** Re-enqueued per tick, at most. */
+export const STUCK_SYNC_BATCH = 25
+/** How far ahead the drift check looks. Past meetings cannot be fixed. */
+export const DRIFT_HORIZON = 30 * DAY
+/**
+ * Bookings drift-checked per tick, at most: one provider read per stored
+ * event, so this bounds the tick's provider calls well inside any quota.
+ */
+export const DRIFT_BATCH = 20
+
+/**
+ * Two sweeps, each failure-isolated, and neither ever throws out of the cron.
+ */
+export async function reconcileCalendarSync(ports: EnginePorts, now: number): Promise<void> {
+  await requeueStuckSyncs(ports, now).catch(() =>
+    console.error(JSON.stringify({ source: 'punctual.calendar_sync', event: 'reconcile_sweep_failed', sweep: 'stuck' })),
+  )
+  await checkCalendarDrift(ports, now).catch(() =>
+    console.error(JSON.stringify({ source: 'punctual.calendar_sync', event: 'reconcile_sweep_failed', sweep: 'drift' })),
+  )
+}
+
+/**
+ * (a) Confirmed, upcoming bookings still `pending` with no event ids ten
+ * minutes after they were made: the create sync never ran (a crash between
+ * the D1 commit and the enqueue) or is lost. Re-enqueue it. Safe to repeat:
+ * a create skips connections that already hold an id, Google's event id is
+ * stable so a twin answers 409 and is read back, and the confirmation is
+ * claimed once. The re-enqueued message carries no manage token (only its
+ * hash is stored), so a confirmation that had NOT gone out yet goes out
+ * without the manage link; see the PR for that trade.
+ */
+export async function requeueStuckSyncs(ports: EnginePorts, now: number): Promise<void> {
+  const repos = ports.repositories({ consistency: 'bookmark' })
+  const stuck = await repos.bookings.listStuckCalendarSyncs(now, now - STUCK_SYNC_AFTER, STUCK_SYNC_BATCH)
+  for (const booking of stuck) {
+    try {
+      await ports.queue.send({ kind: 'calendar.sync', bookingId: booking.id, action: 'create' })
+      logSync('info', {
+        event: 'requeued',
+        bookingId: booking.id,
+        stage: 'reconcile',
+        category: booking.calendarSyncError ?? null,
+        attempt: booking.calendarSyncAttempts ?? 0,
+      })
+    } catch (err) {
+      // On the inline (no-TASKS) path the sync runs right here and a
+      // retryable failure surfaces as this throw; the next tick tries again.
+      logSync('warn', {
+        event: 'requeue_failed',
+        bookingId: booking.id,
+        stage: 'reconcile',
+        category: isCalendarSyncRetry(err) ? err.category : null,
+      })
+    }
+  }
+}
+
+/**
+ * (b) Drift: for synced, upcoming bookings (next 30 days, the least
+ * recently verified first, `DRIFT_BATCH` per tick), read each stored event
+ * back. Deleted, or start/end no longer the booking's: mark the booking
+ * `drifted` and tell its hosts, once (the move is conditional in the
+ * UPDATE). The guest's manage link then refuses to act on it.
+ *
+ * An event that cannot be read (connection needs reconnecting, provider
+ * without `getEvent`, a provider error) is "unknown", never "drifted": a
+ * failed read is not evidence the host moved anything. A rate limit ends
+ * the sweep for this tick.
+ */
+export async function checkCalendarDrift(ports: EnginePorts, now: number): Promise<void> {
+  const repos = ports.repositories({ consistency: 'bookmark' })
+  const candidates = await repos.bookings.listCalendarDriftCandidates({ start: now, end: now + DRIFT_HORIZON }, DRIFT_BATCH)
+  for (const booking of candidates) {
+    let verdict: 'in_sync' | 'moved' | 'deleted' | 'unknown' = 'in_sync'
+    for (const [connectionId, externalId] of Object.entries(booking.externalEventIds)) {
+      const conn = await repos.connections.byId(connectionId)
+      if (!conn || conn.syncStatus !== 'ok') {
+        verdict = 'unknown'
+        continue
+      }
+      let provider: ReturnType<EnginePorts['calendars']['get']>
+      try {
+        provider = ports.calendars.get(conn.provider)
+      } catch {
+        verdict = 'unknown'
+        continue
+      }
+      if (!provider.getEvent) {
+        verdict = 'unknown'
+        continue
+      }
+      try {
+        const snapshot = await provider.getEvent(conn, externalId)
+        if (snapshot === null) {
+          verdict = 'deleted'
+          break
+        }
+        if (snapshot.start !== booking.startUtc || snapshot.end !== booking.endUtc) {
+          verdict = 'moved'
+          break
+        }
+      } catch (err) {
+        const category = classifyCalendarError(err)
+        logSync('warn', { event: 'drift_read_failed', bookingId: booking.id, stage: 'drift_check', category, connectionId, provider: conn.provider })
+        if (category === 'needs_reconnect') {
+          await repos.connections.updateSyncStatus(conn.id, 'needs_reconnect').catch(() => {})
+        }
+        if (category === 'rate_limited') return
+        verdict = 'unknown'
+      }
+    }
+
+    if (verdict === 'moved' || verdict === 'deleted') {
+      if (await repos.bookings.markCalendarDrifted(booking.id)) {
+        logSync('warn', { event: 'drifted', bookingId: booking.id, stage: 'drift_check' })
+        await alertCalendarSync(ports, repos, { ...booking, calendarSyncStatus: 'drifted' }, { kind: 'drifted', reason: verdict }).catch(() =>
+          logSync('error', { event: 'alert_not_sent', bookingId: booking.id, stage: 'drift_check' }),
+        )
+      }
+      continue
+    }
+    // In sync, or unknown: either way it goes to the back of the line, so
+    // one unreadable booking cannot starve the rest of the batch.
+    await repos.bookings.touchCalendarVerified(booking.id, now)
   }
 }
 
