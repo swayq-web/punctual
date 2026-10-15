@@ -28,7 +28,17 @@ Never open a PR against CCCrafts/punctual from here.
 
 ## SwayQ-modified upstream files
 
-<!-- Integrator fills this section. -->
+Against the pin `76dddfd` (`git diff --stat 76dddfd origin/main`, 2026-10-16).
+The integrator appends later units.
+
+- Docs/migrations: `docs/internal-api.md`, `migrations/0018_calendar_sync_state.sql`
+- Adapters: `src/adapters/{calendar-sync-alerts,calendar-sync-errors,calendar-sync-redrive,coordinator,providers,scheduled}.ts`, `src/adapters/d1/{repositories,schema}.ts`, `src/adapters/google/{get-event,internal-meetings,provider}.ts`, `src/adapters/microsoft/{get-event,provider}.ts`, `src/adapters/queue/consumer.ts`
+- Core: `src/core/domain/{booking-service,calendar-sync,types}.ts`, `src/engine.ts`, `src/ports.ts`, `src/testing/fakes.ts`
+- HTTP: `src/http/{router,calendar-connect,dashboard-routes}.ts`, `src/http/api/rest.ts`, `src/http/mcp/server.ts`, `src/index.ts`
+- Internal API (new): `src/internal/{contract,entrypoint,schemas,service,token}.ts`
+- Tests: `test/core/{calendar-parsing,calendar-sync-dispatch,calendar-sync-durability,internal-api}.test.ts`, `test/workers/{calendar-fail-closed,calendar-sync-state,internal-entrypoint,no-avatars-binding}.test.ts`, `test/workers/env.d.ts`
+- Template/ignore: `wrangler.toml` (DLQ consumer block), `.gitignore` (tracks the two SwayQ configs)
+- Avatars: `src/adapters/storage/r2-blob.ts` (null storage when no AVATARS binding), `Env.AVATARS` now optional
 
 ## Environments
 
@@ -37,8 +47,8 @@ Never open a PR against CCCrafts/punctual from here.
 | staging | `swayq-booking-staging` | `book.sway-q.com` | `swayq-booking-staging` | `swayq-booking-cache-staging` | `swayq-booking-tasks-staging` (+ `-dlq`) |
 | production | `swayq-booking` | `book.swayq.com` | `swayq-booking` | `swayq-booking-cache` | `swayq-booking-tasks` (+ `-dlq`) |
 
-`LEGAL_OPERATOR = "SwayQ ApS"` is a guess: confirm the legal entity name before
-production (it is printed on /privacy and /terms).
+`LEGAL_OPERATOR = "SwayQ ApS"` (CVR 46300661, per swayq's privacy copy) is
+printed on /privacy and /terms.
 
 ## Placeholders to fill (from `terraform output` in swayq)
 
@@ -60,18 +70,20 @@ GitHub Environment secrets, per environment (`staging`, `production`):
 rotate `ENCRYPTION_KEY_V1` without the V2 key flow (refresh tokens are
 encrypted with it).
 
-## Env var inventory (vs `Env` in `src/index.ts` at the pin)
+## Env var inventory (vs fork main)
 
 - Set as vars: `BASE_URL`, `BRAND_NAME`, `LEGAL_OPERATOR`, `FROM_EMAIL`,
   `FROM_NAME`, `SUPPORT_EMAIL`, `EMAIL_PROVIDER`, `SIGNUPS` (`@swayq.com`, the
   `@domain` suffix form from `parseSignupPolicy`), `TELEMETRY_ENABLED`.
-- Set as vars, NOT read by the upstream pin (added by SwayQ source changes in
-  parallel work; harmless until then): `INTERNAL_ALLOWED_DOMAINS`,
-  `TURNSTILE_REQUIRED`, `TURNSTILE_SITE_KEY`.
-- Secrets read by upstream: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
-  `ENCRYPTION_KEY_V1`, `SIGNING_KEY`, `RESEND_API_KEY`.
-- Secrets not read by the pin, for the SwayQ source changes: `TURNSTILE_SECRET`,
-  `INTERNAL_SERVICE_TOKEN`.
+- `INTERNAL_ALLOWED_DOMAINS` (var) and `INTERNAL_SERVICE_TOKEN` (secret) are
+  read by the `InternalApi` named entrypoint (`src/internal/entrypoint.ts`,
+  exported from `src/index.ts`; swayq binds it as a service binding). Unset
+  token refuses every call.
+- `TURNSTILE_REQUIRED`, `TURNSTILE_SITE_KEY` (vars) and `TURNSTILE_SECRET`
+  (secret) are set but NOT yet read by the code on fork main; they take effect
+  when the Turnstile source change lands.
+- Secrets read: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+  `ENCRYPTION_KEY_V1`, `SIGNING_KEY`, `RESEND_API_KEY`, `INTERNAL_SERVICE_TOKEN`.
 - Deliberately omitted: `DEMO_BOOKING_PATH`, `GA_MEASUREMENT_ID`,
   `ENCRYPTION_KEY_V2`, `EMAIL` (send_email binding; Resend is used),
   `INSIGHTS` / `INSIGHTS_DATASET` / `INSIGHTS_API_TOKEN` (no Analytics Engine),
@@ -81,15 +93,11 @@ encrypted with it).
 
 ### Caveats found while writing the configs
 
-- `AVATARS` (R2) is typed required (`Env.AVATARS: R2Bucket`) and
-  `createR2BlobStorage(env.AVATARS)` is built at startup, but the bucket is only
-  touched on avatar/logo upload and serve. Without the binding the Worker boots,
-  and those paths throw at runtime. Add a bucket in swayq Terraform and a binding
-  if avatars are wanted.
-- The app has no DLQ-specific handler: `queue()` runs the same
-  `handleQueueBatch` for every batch. A consumer attached to the DLQ would
-  re-run dead messages as tasks, so no DLQ consumer is configured. Dead letters
-  accumulate in `...-dlq` for inspection.
+- `AVATARS` (R2) is optional in `Env`; without the binding blob storage reads
+  as not found and writes throw "avatar storage disabled". Add a bucket in
+  swayq Terraform and a binding if avatars or logos are wanted.
+- Both queue DLQs have a consumer on the same Worker: `handleQueueBatch` routes
+  any queue whose name ends in `-dlq` to the dead-letter handler.
 
 ## First deploy order
 

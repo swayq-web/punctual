@@ -42,7 +42,7 @@ export interface Env {
   DB: D1Database
   CACHE: KVNamespace
   /** Host avatars and team logos — see `ports.ts`'s `BlobStorage` doc comment. */
-  AVATARS: R2Bucket
+  AVATARS?: R2Bucket
   HOST_CALENDAR: DurableObjectNamespace
   RATE_LIMITER: DurableObjectNamespace
   TASKS?: Queue
