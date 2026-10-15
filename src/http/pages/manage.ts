@@ -178,7 +178,7 @@ function rescheduleSection(d: BookingDetailPageData, tokenField: string, locale:
       : `<div class="pu-slots">
     ${slots
       .map((s) => {
-        const label = formatDateTime(locale, s.start, tz, { hour: 'numeric', minute: '2-digit' })
+        const label = formatDateTime(locale, s.start, tz, { hour: '2-digit', minute: '2-digit' })
         const href = `${path}&date=${encodeURIComponent(date)}&start=${s.start}${langParam}`
         return `<a class="${slotStateClassName('available')}" href="${escapeHtml(href)}">
       <time datetime="${new Date(s.start).toISOString()}">${escapeHtml(label)}</time></a>`

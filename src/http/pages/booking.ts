@@ -714,7 +714,7 @@ export function slotList(d: BookingPageData): string {
   // held/booked at all?) outside this ticket's scope.
   const items = slots
     .map((s) => {
-      const label = formatDateTime(locale, s.start, d.guestTimezone, { hour: 'numeric', minute: '2-digit' })
+      const label = formatDateTime(locale, s.start, d.guestTimezone, { hour: '2-digit', minute: '2-digit' })
       const href =
         `${bookingPath(d)}/confirm?start=${s.start}` +
         `&tz=${encodeURIComponent(d.guestTimezone)}` +

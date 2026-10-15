@@ -161,7 +161,7 @@ export function formatWhenLong(locale: Locale, ts: number, timeZone: string): st
     weekday: 'long',
     month: 'long',
     day: 'numeric',
-    hour: 'numeric',
+    hour: '2-digit',
     minute: '2-digit',
   })
 }
