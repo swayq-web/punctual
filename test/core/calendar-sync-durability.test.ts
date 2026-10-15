@@ -594,6 +594,16 @@ describe('drift reads the calendar the event was written to (judge P2)', () => {
     expect(h.booking().calendarSyncStatus).toBe('synced')
   })
 
+  it('the host repointed and then moved the event on its ORIGINAL calendar: still detected (read from where it was written)', async () => {
+    const h = harness()
+    await syncedOn(h)
+    repoint(h)
+    const [id, ev] = [...h.google.events.entries()][0]!
+    h.google.events.set(id, { ...ev, start: { dateTime: new Date(START + HOUR).toISOString() }, end: { dateTime: new Date(START + 90 * MINUTE).toISOString() } })
+    await checkCalendarDrift(h.ports, NOW)
+    expect(h.booking().calendarSyncStatus).toBe('drifted')
+  })
+
   it('a 404 after the host repointed is unknown, not drifted', async () => {
     const h = harness()
     await syncedOn(h)
