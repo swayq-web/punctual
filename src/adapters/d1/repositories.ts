@@ -737,8 +737,8 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
             `INSERT INTO bookings
              (id,event_type_id,host_user_id,host_user_ids_json,guest_name,guest_email,guest_timezone,
               start_utc,end_utc,local_date,status,answers_json,external_event_ids_json,reschedule_of,
-              rescheduled_to,manage_token_hash,cancelled_at,created_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              rescheduled_to,manage_token_hash,cancelled_at,created_at,guest_locale)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           )
           .bind(
             booking.id, booking.eventTypeId, booking.hostUserId,
@@ -746,7 +746,7 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
             booking.guestTimezone, booking.startUtc, booking.endUtc, booking.localDate, booking.status,
             JSON.stringify(booking.answers), JSON.stringify(booking.externalEventIds),
             booking.rescheduleOf, booking.rescheduledTo, booking.manageTokenHash,
-            booking.cancelledAt, booking.createdAt,
+            booking.cancelledAt, booking.createdAt, booking.guestLocale ?? null,
           ),
       ]
 
@@ -926,6 +926,98 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
 
     async rotateManageToken(bookingId, tokenHash) {
       await run('UPDATE bookings SET manage_token_hash = ? WHERE id = ?', tokenHash, bookingId)
+    },
+
+    async markCalendarSynced(bookingId, at, opts) {
+      // A redelivered create that wrote nothing must not wash out a drift
+      // the reconciler recorded; only an update that rewrote the events may.
+      await run(
+        `UPDATE bookings
+            SET calendar_sync_status = 'synced', calendar_sync_error = NULL, calendar_synced_at = ?
+          WHERE id = ? AND (? = 1 OR calendar_sync_status != 'drifted')`,
+        at,
+        bookingId,
+        opts?.clearDrift ? 1 : 0,
+      )
+    },
+
+    async recordCalendarSyncRetry(bookingId, category) {
+      // `failed` is sticky against a stray retry: the dead-letter path or a
+      // permanent error already told the host, and flipping back to pending
+      // would hide that from the dashboard.
+      await run(
+        `UPDATE bookings
+            SET calendar_sync_attempts = calendar_sync_attempts + 1,
+                calendar_sync_error = ?,
+                calendar_sync_status = CASE WHEN calendar_sync_status = 'failed' THEN 'failed' ELSE 'pending' END
+          WHERE id = ?`,
+        category,
+        bookingId,
+      )
+    },
+
+    async markCalendarSyncFailed(bookingId, category, opts) {
+      // The condition lives in the UPDATE (same discipline as
+      // `claimConfirmation`): a permanent error and a dead-lettered retry of
+      // the same booking can land together, and the host is told once.
+      const res = await q(
+        `UPDATE bookings
+            SET calendar_sync_status = 'failed',
+                calendar_sync_attempts = calendar_sync_attempts + 1,
+                calendar_sync_error = COALESCE(?, calendar_sync_error, 'retries_exhausted')
+          WHERE id = ? AND calendar_sync_status != 'failed'
+            AND (? = 0 OR calendar_sync_status = 'pending')`,
+        category,
+        bookingId,
+        opts?.fromPendingOnly ? 1 : 0,
+      ).run()
+      return (res.meta.changes ?? 0) > 0
+    },
+
+    async markCalendarDrifted(bookingId) {
+      const res = await q(
+        `UPDATE bookings SET calendar_sync_status = 'drifted'
+          WHERE id = ? AND calendar_sync_status = 'synced' AND status = 'confirmed'`,
+        bookingId,
+      ).run()
+      return (res.meta.changes ?? 0) > 0
+    },
+
+    async touchCalendarVerified(bookingId, at) {
+      await run(
+        `UPDATE bookings SET calendar_synced_at = ? WHERE id = ? AND calendar_sync_status = 'synced'`,
+        at,
+        bookingId,
+      )
+    },
+
+    async listStuckCalendarSyncs(now, createdBefore, limit) {
+      const rows = await all<Record<string, unknown>>(
+        `SELECT * FROM bookings
+          WHERE calendar_sync_status = 'pending' AND status = 'confirmed' AND start_utc > ?
+            AND external_event_ids_json = '{}' AND created_at < ?
+          ORDER BY start_utc
+          LIMIT ?`,
+        now,
+        createdBefore,
+        limit,
+      )
+      return rows.map((r) => mapBooking(r)!).filter(Boolean)
+    },
+
+    async listCalendarDriftCandidates(range, limit) {
+      const rows = await all<Record<string, unknown>>(
+        `SELECT * FROM bookings
+          WHERE calendar_sync_status = 'synced' AND status = 'confirmed'
+            AND start_utc >= ? AND start_utc < ?
+            AND external_event_ids_json != '{}'
+          ORDER BY COALESCE(calendar_synced_at, 0), start_utc
+          LIMIT ?`,
+        range.start,
+        range.end,
+        limit,
+      )
+      return rows.map((r) => mapBooking(r)!).filter(Boolean)
     },
   }
 
@@ -1757,6 +1849,13 @@ function mapBooking(row: Record<string, unknown> | null): Booking | null {
     manageTokenHash: String(row['manage_token_hash']),
     cancelledAt: row['cancelled_at'] == null ? null : Number(row['cancelled_at']),
     createdAt: Number(row['created_at']),
+    // Absent on a row read through a SELECT that predates migration 0018's
+    // columns (never, once it is applied); `pending` is the column default.
+    calendarSyncStatus: (row['calendar_sync_status'] == null ? 'pending' : String(row['calendar_sync_status'])) as NonNullable<Booking['calendarSyncStatus']>,
+    calendarSyncAttempts: Number(row['calendar_sync_attempts'] ?? 0),
+    calendarSyncError: row['calendar_sync_error'] == null ? null : (String(row['calendar_sync_error']) as NonNullable<Booking['calendarSyncError']>),
+    calendarSyncedAt: row['calendar_synced_at'] == null ? null : Number(row['calendar_synced_at']),
+    guestLocale: row['guest_locale'] == null ? null : String(row['guest_locale']),
   }
 }
 

@@ -231,9 +231,19 @@ export const bookings = sqliteTable(
     manageTokenHash: text('manage_token_hash').notNull(),
     cancelledAt: integer('cancelled_at'),
     createdAt: integer('created_at').notNull(),
+    // Durable calendar sync (migration 0018): 'pending' | 'synced' | 'failed'
+    // | 'drifted', the failed-attempt count, an error CATEGORY (never a
+    // provider body), and when the events were last known to match.
+    calendarSyncStatus: text('calendar_sync_status').notNull().default('pending'),
+    calendarSyncAttempts: integer('calendar_sync_attempts').notNull().default(0),
+    calendarSyncError: text('calendar_sync_error'),
+    calendarSyncedAt: integer('calendar_synced_at'),
+    // The guest's language; null means the deployment default.
+    guestLocale: text('guest_locale'),
   },
   (t) => [
     index('bookings_host_start_idx').on(t.hostUserId, t.startUtc),
+    index('bookings_calendar_sync_idx').on(t.calendarSyncStatus, t.startUtc),
     index('bookings_host_local_date_idx').on(t.hostUserId, t.localDate),
     index('bookings_event_type_idx').on(t.eventTypeId),
     uniqueIndex('bookings_manage_token_idx').on(t.manageTokenHash),
