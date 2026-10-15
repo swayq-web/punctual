@@ -285,8 +285,10 @@ export function describeLocation(et: EventType, conferenceUrl?: string | null): 
       // The real link when the provider minted one. Before the conference-link change this
       // always returned the placeholder below, which told the guest the link
       // was "in the calendar invite" — while sitting IN that very invite,
-      // and while `sendUpdates=none` stopped Google sending its own. A guest
-      // on a non-Google mailbox had no way to join at all.
+      // and while Google was told not to send its own. A guest on a non-Google
+      // mailbox had no way to join at all. (Google now sends the invitation
+      // itself, `sendUpdates=all`; this text still serves the non-Google
+      // .ics and the email body.)
       if (conferenceUrl) return conferenceUrl
       // No link yet (sync has not run, or the provider minted none). Say
       // that plainly rather than pointing at an invite that does not have it.

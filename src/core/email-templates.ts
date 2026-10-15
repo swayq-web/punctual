@@ -85,6 +85,11 @@ export interface BookingEmailContext {
    * this host (`findOtherUpcomingGuestBooking`), the host is told in the intro.
    */
   priorBookingStartUtc?: number
+  /**
+   * A Google-hosted reschedule: Google cancels the old invitation and sends a
+   * NEW one (new Meet link) as separate notices.
+   */
+  newInviteFollows?: boolean
 }
 
 // Brand palette (swayq-2026 light tokens). Inline hex rather than tokens:
@@ -611,12 +616,16 @@ function rescheduledForGuest(ctx: RescheduleEmailContext): EmailContent {
     locale,
     preheader: formatWhenShort(ctx.booking.startUtc, tz, locale),
     heading: t(locale, 'email.rescheduled.heading'),
-    intro: t(locale, 'email.rescheduled.intro', { guest: ctx.booking.guestName, host }),
+    intro: t(locale, ctx.newInviteFollows ? 'email.rescheduled.introNewInvite' : 'email.rescheduled.intro', { guest: ctx.booking.guestName, host }),
     rows,
     ctas: guestCtas(ctx, locale),
     // ADR-0005 §4: rescheduling rotates the manage token, so links in the
     // superseded confirmation are dead. Saying so prevents a support ticket.
-    notes: [...guestNotes(ctx, locale, 'email.updatedInvitationNote'), t(locale, 'email.oldLinks')],
+    // A Google-hosted move is a cancel plus a new invitation, not an update.
+    notes: [
+      ...guestNotes(ctx, locale, ctx.newInviteFollows ? 'email.newInvitationNote' : 'email.updatedInvitationNote'),
+      t(locale, 'email.oldLinks'),
+    ],
     ...hostReplyTo(ctx),
   }
   return render(

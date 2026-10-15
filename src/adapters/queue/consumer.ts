@@ -239,10 +239,10 @@ async function hmacHex(secret: string, payload: string): Promise<string> {
  * inviting the other N-1. A host with connections only on the other
  * provider is an attendee there instead; a host with no connection at all
  * is listed on the primary provider's event by address — which lands on
- * their calendar only if that address is an account there (Google sends
- * no email under sendUpdates=none), so it is a courtesy on top of the
- * host confirmation email that already carries the .ics, not the delivery
- * path. Optional hosts are flagged optional in the invite.
+ * their calendar only if that address is an account there, so it is a
+ * courtesy on top of the host confirmation email that already carries the
+ * .ics, not the delivery path (the guest's invitation is Google's own,
+ * sendUpdates=all, for a Google-channel booking). Optional hosts are flagged optional in the invite.
  *
  * Per-provider failure is tolerated: the organizer's expired Google token
  * must not stop the event landing in Outlook. Tolerated is not ignored
@@ -337,13 +337,18 @@ async function syncCalendar(
     for (const [connId, externalId] of Object.entries(booking.externalEventIds)) {
       const conn = await repos.connections.byId(connId)
       if (!conn) {
-        // The connection is gone; so is our way to reach the event. Drop the
-        // id rather than retry forever against nothing.
-        delete createdIds[connId]
+        // The connection row is gone, so there is no way to reach the event.
+        // That is a permanent failure the host must hear about (the meeting is
+        // still on the guest's and host's calendar), never a silent id drop:
+        // the id stays stored and `settle` marks the booking failed and alerts.
+        failures.push({ connectionId: connId, category: 'needs_reconnect' })
+        logSync('warn', { event: 'connection_missing', bookingId: booking.id, stage, category: 'needs_reconnect', connectionId: connId, ...attempt })
         continue
       }
       try {
-        await ports.calendars.get(conn.provider).deleteEvent(conn, externalId)
+        // The calendar the event was WRITTEN to, not wherever the host points
+        // their write calendar today (unknown only for pre-0018 events).
+        await ports.calendars.get(conn.provider).deleteEvent(conn, externalId, booking.externalEventCalendars?.[connId])
         // Only drop the id once the provider confirms. Clearing the whole
         // map unconditionally meant one host's expired token discarded
         // another host's id too, leaving that event on a real calendar
@@ -520,7 +525,7 @@ async function syncCalendar(
         // connection, which is still theirs.
         const departed = !booking.hostUserIds.includes(conn.userId) && !plan.events.some((e) => e.conn.provider === conn.provider)
         const attendees = planned ?? (departed ? plan.currentAttendees : await legacyAttendees(repos, booking, conn))
-        await ports.calendars.get(conn.provider).updateEvent(conn, externalId, externalFor(conn, attendees))
+        await ports.calendars.get(conn.provider).updateEvent(conn, externalId, externalFor(conn, attendees), booking.externalEventCalendars?.[conn.id])
       } catch (err) {
         await recordFailure(conn, err)
       }
@@ -729,7 +734,7 @@ export async function dispatchConfirmation(
 ): Promise<void> {
   const repos = ports.repositories({ consistency: 'bookmark' })
 
-  const booking = await repos.bookings.byId(bookingId)
+  let booking = await repos.bookings.byId(bookingId)
   if (!booking || booking.status !== 'confirmed') return
   const eventType = await repos.eventTypes.byId(booking.eventTypeId)
   if (!eventType) return
@@ -790,7 +795,10 @@ export async function dispatchConfirmation(
     // later cancel or reschedule can follow the same channel: 'google' when
     // a Google event for the booking exists right now (it can carry
     // Google's own invitation), else 'ics' (the attachment on this email).
-    await repos.bookings.setInviteChannel(booking.id, await inviteChannelFor(repos, booking))
+    const channel = await inviteChannelFor(repos, booking)
+    await repos.bookings.setInviteChannel(booking.id, channel)
+    // The mail is built from this object, and it decides whether an .ics is attached.
+    booking = { ...booking, inviteChannel: channel }
 
     if (previous) {
       await notifyBookingRescheduled({

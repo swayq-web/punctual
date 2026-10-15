@@ -163,6 +163,8 @@ export const en = {
   'email.cancelled.intro': '{guest}, your meeting with {host} was cancelled.',
   'email.cta.reschedule': 'Reschedule',
   'email.cta.cancel': 'Cancel',
+  'email.rescheduled.introNewInvite': '{guest}, Your meeting with {host} has a new time. Google is cancelling your old calendar invitation and sending a new one, with a new meeting link.',
+  'email.newInvitationNote': 'Google will send you a new calendar invitation with a new meeting link.',
   'email.updatedInvitationNote': 'Google will send you an updated calendar invitation.',
   'email.oldLinks': 'Links in the earlier confirmation no longer work. Use the ones above.',
   'email.cta.bookAgain': 'Book a new time',
