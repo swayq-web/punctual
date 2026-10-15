@@ -792,7 +792,7 @@ describe('Google-channel reschedule and cancel', () => {
     expect(mails(h).length).toBe(2)
     for (const m of mails(h)) expect(m.message.attachments).toBeUndefined()
     const guest = mails(h).find((m) => m.message.to === 'ada@example.com')!
-    expect(guest.message.text).toContain('old calendar invitation is cancelled')
+    expect(guest.message.text).toContain('cancelling your old calendar invitation')
   })
 
   it('an ics-channel original keeps the .ics on the moved mail', async () => {
