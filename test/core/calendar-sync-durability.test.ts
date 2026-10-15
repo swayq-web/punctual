@@ -31,6 +31,8 @@ import { createFakeRepositories } from '../../src/testing/fakes.js'
 import { retryDelaySeconds } from '../../src/core/domain/calendar-sync.js'
 import { parseGoogleEventSnapshot } from '../../src/adapters/google/get-event.js'
 import { parseGraphEventSnapshot } from '../../src/adapters/microsoft/get-event.js'
+import { redriveAfterReconnect } from '../../src/adapters/calendar-sync-redrive.js'
+import { saveCalendarConnection } from '../../src/http/calendar-connect.js'
 
 const MINUTE = 60_000
 const HOUR = 3_600_000
@@ -42,12 +44,15 @@ const START = NOW + 2 * 24 * HOUR
 // id answers 409, exactly like the real API's "identifier already exists".
 // ---------------------------------------------------------------------------
 
-type GoogleEvent = { id: string; status: string; start: { dateTime: string }; end: { dateTime: string } }
+type GoogleEvent = { id: string; status: string; calendar: string; start: { dateTime: string }; end: { dateTime: string } }
 
 function statefulGoogle() {
   const events = new Map<string, GoogleEvent>()
   /** Scripted failures, consumed one per events.insert. */
   const insertScript: Array<'ok' | 'lose-answer' | { status: number; body?: string } | 'network'> = []
+  /** Scripted failures for events.patch / events.delete, one per call. */
+  const patchScript: Array<{ status: number; body?: string }> = []
+  const deleteScript: Array<{ status: number; body?: string }> = []
   let inserts = 0
   const json = (status: number, body: unknown) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -55,9 +60,16 @@ function statefulGoogle() {
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input.toString())
     const method = init?.method ?? 'GET'
-    const m = /\/calendars\/[^/]+\/events(?:\/([^/?]+))?$/.exec(url.pathname)
+    const m = /\/calendars\/([^/]+)\/events(?:\/([^/?]+))?$/.exec(url.pathname)
     if (!m) return json(501, { error: 'no route' })
-    const id = m[1] ? decodeURIComponent(m[1]) : undefined
+    // Events live on ONE calendar, as at Google: reading one from another
+    // calendar is a 404 even though the id exists.
+    const calendar = decodeURIComponent(m[1]!)
+    const id = m[2] ? decodeURIComponent(m[2]) : undefined
+    const onThisCalendar = (eid: string) => {
+      const ev = events.get(eid)
+      return ev && ev.calendar === calendar ? ev : undefined
+    }
 
     if (method === 'POST' && !id) {
       inserts += 1
@@ -66,31 +78,35 @@ function statefulGoogle() {
       if (typeof step === 'object') return json(step.status, { error: { message: step.body ?? 'scripted' } })
       const body = JSON.parse(String(init?.body)) as { id: string; start: { dateTime: string }; end: { dateTime: string } }
       if (events.has(body.id)) return json(409, { error: { message: 'The requested identifier already exists.' } })
-      const ev: GoogleEvent = { id: body.id, status: 'confirmed', start: body.start, end: body.end }
+      const ev: GoogleEvent = { id: body.id, status: 'confirmed', calendar, start: body.start, end: body.end }
       events.set(body.id, ev)
       // Google committed the event; the response is lost on the way back.
       if (step === 'lose-answer') throw new DOMException('The operation timed out.', 'TimeoutError')
       return json(200, ev)
     }
     if (method === 'GET' && id) {
-      const ev = events.get(id)
+      const ev = onThisCalendar(id)
       return ev ? json(200, ev) : json(404, { error: { message: 'Not Found' } })
     }
     if (method === 'PATCH' && id) {
-      const ev = events.get(id)
+      const step = patchScript.shift()
+      if (step) return json(step.status, { error: { message: step.body ?? 'scripted' } })
+      const ev = onThisCalendar(id)
       if (!ev) return json(404, {})
       const body = JSON.parse(String(init?.body)) as Partial<GoogleEvent>
       events.set(id, { ...ev, ...body, id })
       return json(200, events.get(id))
     }
     if (method === 'DELETE' && id) {
+      const step = deleteScript.shift()
+      if (step) return json(step.status, { error: { message: step.body ?? 'scripted' } })
       events.delete(id)
       return new Response(null, { status: 204 })
     }
     return json(501, { error: 'no route' })
   }) as typeof globalThis.fetch
 
-  return { events, insertScript, fetchImpl, inserts: () => inserts }
+  return { events, insertScript, patchScript, deleteScript, fetchImpl, inserts: () => inserts }
 }
 
 const TOKENS: OAuthTokens = { accessToken: 'ya29.valid', refreshToken: '1//r', expiresAt: NOW + 10 * HOUR, scope: 'x' }
@@ -151,6 +167,10 @@ function harness(opts: { booking?: Partial<Booking>; connections?: CalendarConne
       const c = repos.state.connections.get(id)
       if (c) repos.state.connections.set(id, { ...c, syncStatus: status })
     },
+    // What a reconnect writes (http/calendar-connect.ts).
+    updateTokens: async () => {},
+    updateAccountEmail: async () => {},
+    updateCalendars: async () => {},
   })
   Object.assign(repos.users as object, { listAll: async () => [...repos.state.users.values()] })
 
@@ -442,5 +462,230 @@ describe('provider read-back parsers', () => {
     expect(parseGraphEventSnapshot({ start: { dateTime: '2026-10-18T10:00:00.0000000', timeZone: 'UTC' }, end: { dateTime: '2026-10-18T10:30:00.0000000', timeZone: 'UTC' } }))
       .toEqual({ start: Date.UTC(2026, 9, 18, 10), end: Date.UTC(2026, 9, 18, 10, 30) })
     expect(parseGraphEventSnapshot({ isCancelled: true })).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Judge round 1 (SWA-1286)
+// ---------------------------------------------------------------------------
+
+describe('a host whose calendar connection is broken (judge P1)', () => {
+  const broken: CalendarConnection = { ...conn, syncStatus: 'needs_reconnect' }
+
+  it('is a failed needs_reconnect booking, alerted once, never synced', async () => {
+    const h = harness({ connections: [broken] })
+    const { batch, message } = batchOf(h.create, 1)
+    await handleQueueBatch(batch, h.ports)
+
+    expect(message.ack).toHaveBeenCalled()
+    expect(h.google.events.size).toBe(0)
+    expect(h.booking()).toMatchObject({ calendarSyncStatus: 'failed', calendarSyncError: 'needs_reconnect' })
+    expect(h.alerts().map((e) => e.to).sort()).toEqual(['admin@example.com', 'grace@example.com'])
+    expect(h.confirmations()).toHaveLength(1)
+
+    await handleQueueBatch(batchOf(h.create, 1).batch, h.ports)
+    expect(h.alerts()).toHaveLength(2)
+  })
+
+  it('a host who chose no write calendar is not a failure', async () => {
+    const h = harness({ connections: [{ ...conn, calendarIdWrite: null }] })
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+    expect(h.alerts()).toHaveLength(0)
+  })
+
+  it('a healthy connection beside the broken one still writes, and the booking is synced', async () => {
+    const h = harness({ connections: [broken, { ...conn, id: 'conn_2', syncStatus: 'ok' }] })
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.google.events.size).toBe(1)
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+  })
+
+  it('reconnecting re-drives the failed booking through the create path: one event, no second email', async () => {
+    const h = harness({ connections: [broken] })
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().calendarSyncStatus).toBe('failed')
+    const emailsBefore = h.confirmations().length
+
+    // The connection is repaired the way http/calendar-connect.ts does it,
+    // and its callback re-drives.
+    let usable = 0
+    await saveCalendarConnection(
+      {
+        repos: h.repos,
+        crypto: { encrypt: async () => ({ ciphertext: 'c', keyVersion: 1 }), randomToken: (n = 16) => 'r'.repeat(n) },
+        clock: { now: () => NOW },
+        listCalendars: async () => [{ id: 'primary', name: 'Primary', primary: true, accountEmail: 'grace@example.com' }],
+        onCalendarUsable: async (userId) => {
+          usable += 1
+          return redriveAfterReconnect(h.ports, userId)
+        },
+      },
+      'u_host',
+      'google',
+      { accessToken: 'a', refreshToken: 'r', expiresInMs: HOUR, scope: 's', accountEmail: 'grace@example.com' },
+    )
+    expect(usable).toBe(1)
+    expect(h.repos.state.connections.get('conn_1')!.syncStatus).toBe('ok')
+    expect(h.queued.filter((m) => m.kind === 'calendar.sync')).toEqual([{ kind: 'calendar.sync', bookingId: 'bk_1', action: 'create' }])
+    expect(h.booking().calendarSyncStatus).toBe('pending')
+
+    await handleOne(h.queued.find((m) => m.kind === 'calendar.sync')!, h.ports, { attempts: 1 })
+    expect(h.google.events.size).toBe(1)
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+    expect(h.confirmations()).toHaveLength(emailsBefore)
+  })
+})
+
+describe('a stale retry never downgrades a synced booking (judge P2)', () => {
+  it('update fails retryably on a synced booking: stays synced; its dead letter fails nothing and alerts nobody', async () => {
+    const h = harness()
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+    h.queued.length = 0
+
+    h.google.patchScript.push({ status: 503 })
+    const update = { kind: 'calendar.sync', bookingId: 'bk_1', action: 'update' } as const
+    const { batch, message } = batchOf(update, 1)
+    await handleQueueBatch(batch, h.ports)
+    expect(message.retry).toHaveBeenCalled()
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+
+    await handleQueueBatch(batchOf(update, 1, 'punctual-tasks-dlq').batch, h.ports)
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+    expect(h.alerts()).toHaveLength(0)
+  })
+})
+
+describe('alert wording follows the failed write (judge P2)', () => {
+  it('a failed delete says the cancelled meeting is still on the calendar, never "add it"', async () => {
+    const h = harness({ booking: { status: 'cancelled', externalEventIds: { conn_1: 'evt_x' }, calendarSyncStatus: 'synced' } })
+    h.google.deleteScript.push({ status: 403, body: 'forbidden' })
+    await handleOne({ kind: 'calendar.sync', bookingId: 'bk_1', action: 'delete' }, h.ports, { attempts: 1 })
+
+    const text = h.alerts().find((e) => e.to === 'grace@example.com')!.text
+    expect(text).toContain('was cancelled, but it is still on your calendar')
+    expect(text).toContain('Remove the event')
+    expect(text).not.toContain('add it to your calendar')
+  })
+
+  it('a failed create still says add it by hand', async () => {
+    const h = harness()
+    h.google.insertScript.push({ status: 404 })
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.alerts()[0]!.text).toContain('add it to your calendar by hand')
+  })
+})
+
+describe('drift reads the calendar the event was written to (judge P2)', () => {
+  async function syncedOn(h: ReturnType<typeof harness>) {
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().externalEventCalendars).toEqual({ conn_1: 'primary' })
+    h.queued.length = 0
+  }
+  const repoint = (h: ReturnType<typeof harness>) =>
+    h.repos.state.connections.set('conn_1', { ...h.repos.state.connections.get('conn_1')!, calendarIdWrite: 'work@example.com' })
+
+  it('the host repointed their write calendar: the old event is still found, no drift', async () => {
+    const h = harness()
+    await syncedOn(h)
+    repoint(h)
+    await checkCalendarDrift(h.ports, NOW)
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+  })
+
+  it('a 404 after the host repointed is unknown, not drifted', async () => {
+    const h = harness()
+    await syncedOn(h)
+    repoint(h)
+    h.google.events.clear()
+    await checkCalendarDrift(h.ports, NOW)
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+    expect(h.alerts()).toHaveLength(0)
+  })
+
+  it('an event with no recorded calendar (written before 0018): a 404 is unknown', async () => {
+    const h = harness({ booking: { calendarSyncStatus: 'synced', externalEventIds: { conn_1: 'evt_old' }, externalEventCalendars: {} } })
+    await checkCalendarDrift(h.ports, NOW)
+    expect(h.booking().calendarSyncStatus).toBe('synced')
+  })
+
+  it('a 404 on the recorded, still-current calendar is a deletion', async () => {
+    const h = harness()
+    await syncedOn(h)
+    h.google.events.clear()
+    await checkCalendarDrift(h.ports, NOW)
+    expect(h.booking().calendarSyncStatus).toBe('drifted')
+  })
+})
+
+describe('the reconciler leaves a booking inside its retry chain alone (judge P3)', () => {
+  it('attempts > 0 and touched 5 minutes ago: skipped; touched 25 minutes ago: re-enqueued', async () => {
+    const h = harness({ booking: { createdAt: NOW - HOUR, calendarSyncAttempts: 1, calendarSyncUpdatedAt: NOW - 5 * MINUTE } })
+    await requeueStuckSyncs(h.ports, NOW)
+    expect(h.queued).toEqual([])
+
+    const later = harness({ booking: { createdAt: NOW - HOUR, calendarSyncAttempts: 1, calendarSyncUpdatedAt: NOW - 25 * MINUTE } })
+    await requeueStuckSyncs(later.ports, NOW)
+    expect(later.queued).toHaveLength(1)
+  })
+})
+
+describe('a reconciler-driven confirmation carries a working manage link (judge P3)', () => {
+  it('no token on the message: a fresh token is issued, stored, and put in the email', async () => {
+    const h = harness()
+    await handleOne({ kind: 'calendar.sync', bookingId: 'bk_1', action: 'create' }, h.ports, { attempts: 1 })
+
+    const mail = h.confirmations()[0]!
+    const token = /\/booking\/bk_1\?token=([^"&\s]+)/.exec(mail.text + mail.html)?.[1]
+    expect(token).toBeDefined()
+    expect(h.booking().manageTokenHash).toBe(`h:${decodeURIComponent(token!)}`)
+  })
+
+  it('the normal path (token on the message) never rotates', async () => {
+    const h = harness()
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().manageTokenHash).toBe('hash')
+    expect(h.confirmations()[0]!.text).toContain('token=tok')
+  })
+
+  it('a token-less redelivery after the confirmation went out rotates nothing', async () => {
+    const h = harness()
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    await handleOne({ kind: 'calendar.sync', bookingId: 'bk_1', action: 'create' }, h.ports, { attempts: 1 })
+    expect(h.booking().manageTokenHash).toBe('hash')
+  })
+})
+
+describe('invite channel is stored when the confirmation is sent (W3 prep)', () => {
+  it("'google' when a Google event exists at that moment", async () => {
+    const h = harness()
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().inviteChannel).toBe('google')
+  })
+
+  it("'ics' when the host has no calendar", async () => {
+    const h = harness({ connections: [] })
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().inviteChannel).toBe('ics')
+  })
+
+  it("'ics' when the Google write failed", async () => {
+    const h = harness()
+    h.google.insertScript.push({ status: 403, body: 'forbidden' })
+    await handleOne(h.create, h.ports, { attempts: 1 })
+    expect(h.booking().inviteChannel).toBe('ics')
+  })
+})
+
+describe('an unusable 2xx from the provider is retryable (judge P3)', () => {
+  it('events.insert answers 200 with no id: retried, not failed', async () => {
+    const h = harness()
+    h.google.insertScript.push({ status: 200 }) // a 200 whose body carries no event id
+    const { batch, message } = batchOf(h.create, 2)
+    await handleQueueBatch(batch, h.ports)
+    expect(message.retry).toHaveBeenCalled()
+    expect(h.booking()).toMatchObject({ calendarSyncStatus: 'pending', calendarSyncError: 'provider_unavailable' })
+    expect(h.alerts()).toHaveLength(0)
   })
 })

@@ -181,3 +181,51 @@ describe('guest manage link on a drifted booking', () => {
     expect((await repos().bookings.byId('bk_dr_cancel'))?.status).toBe('confirmed')
   })
 })
+
+describe('judge round 1, against real SQL', () => {
+  it('a retry never downgrades synced or drifted; it counts on pending and keeps failed', async () => {
+    await insert(booking('bk_r_synced', { externalEventIds: { c: 'e' } }))
+    await repos().bookings.markCalendarSynced('bk_r_synced', NOW)
+    await repos().bookings.recordCalendarSyncRetry('bk_r_synced', 'network', NOW)
+    expect(await repos().bookings.byId('bk_r_synced')).toMatchObject({ calendarSyncStatus: 'synced', calendarSyncAttempts: 0, calendarSyncError: null })
+    // ... so a dead letter for it cannot fail it either.
+    expect(await repos().bookings.markCalendarSyncFailed('bk_r_synced', null, { fromPendingOnly: true })).toBe(false)
+
+    await insert(booking('bk_r_pending'))
+    await repos().bookings.recordCalendarSyncRetry('bk_r_pending', 'network', NOW)
+    expect(await repos().bookings.byId('bk_r_pending')).toMatchObject({ calendarSyncStatus: 'pending', calendarSyncAttempts: 1, calendarSyncUpdatedAt: NOW })
+  })
+
+  it('stores the calendar of each event with its id, and the invite channel (CHECKed)', async () => {
+    await insert(booking('bk_cal'))
+    await repos().bookings.setSyncResult('bk_cal', { conn_a: 'ev_a' }, null, { conn_a: 'primary' })
+    await repos().bookings.setInviteChannel('bk_cal', 'google')
+    expect(await repos().bookings.byId('bk_cal')).toMatchObject({ externalEventCalendars: { conn_a: 'primary' }, inviteChannel: 'google' })
+    // Omitting calendars leaves them alone.
+    await repos().bookings.setSyncResult('bk_cal', { conn_a: 'ev_a' }, 'https://meet.example/x')
+    expect((await repos().bookings.byId('bk_cal'))?.externalEventCalendars).toEqual({ conn_a: 'primary' })
+    await expect(db.prepare("UPDATE bookings SET invite_channel = 'fax' WHERE id = 'bk_cal'").run()).rejects.toThrow()
+  })
+
+  it('the stuck query skips a booking inside its own retry chain', async () => {
+    await insert(booking('bk_chain', { createdAt: NOW - 60 * 60_000 }))
+    await repos().bookings.recordCalendarSyncRetry('bk_chain', 'network', NOW - 5 * 60_000)
+    const ids = async () => (await repos().bookings.listStuckCalendarSyncs(NOW, NOW - 10 * 60_000, 100, NOW - 20 * 60_000)).map((b) => b.id)
+    expect(await ids()).not.toContain('bk_chain')
+    await db.prepare('UPDATE bookings SET calendar_sync_updated_at = ? WHERE id = ?').bind(NOW - 25 * 60_000, 'bk_chain').run()
+    expect(await ids()).toContain('bk_chain')
+  })
+
+  it("lists a host's failed needs_reconnect bookings and reopens each once", async () => {
+    await insert(booking('bk_recon'))
+    await repos().bookings.markCalendarSyncFailed('bk_recon', 'needs_reconnect')
+    await insert(booking('bk_other_fail'))
+    await repos().bookings.markCalendarSyncFailed('bk_other_fail', 'permission_denied')
+    const listed = (await repos().bookings.listFailedNeedingReconnect(HOST_ID, NOW, 100)).map((b) => b.id)
+    expect(listed).toContain('bk_recon')
+    expect(listed).not.toContain('bk_other_fail')
+    expect(await repos().bookings.reopenCalendarSync('bk_recon', NOW)).toBe(true)
+    expect(await repos().bookings.reopenCalendarSync('bk_recon', NOW)).toBe(false)
+    expect((await repos().bookings.byId('bk_recon'))?.calendarSyncStatus).toBe('pending')
+  })
+})
