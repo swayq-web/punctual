@@ -31,7 +31,7 @@ export function isLocale(value: unknown): value is Locale {
 
 /** The BCP 47 tag handed to `Intl`. */
 export function intlTag(locale: Locale): string {
-  return locale === 'da' ? 'da-DK' : 'en-US'
+  return locale === 'da' ? 'da-DK' : 'en-GB'
 }
 
 /** `{name}` placeholders. Unknown placeholders are left visible rather than blanked, so a typo shows up in review. */

@@ -316,7 +316,7 @@ describe('a fresh page load shows today, not "pick a day"', () => {
     // what time the suite happens to run.
     const today = new Date().toISOString().slice(0, 10)
     const [y, m, d] = today.split('-').map(Number)
-    const todayHeader = new Intl.DateTimeFormat('en-US', {
+    const todayHeader = new Intl.DateTimeFormat('en-GB', {
       weekday: 'long',
       month: 'long',
       day: 'numeric',

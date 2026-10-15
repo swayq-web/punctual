@@ -98,6 +98,8 @@ function ctx(patch: Partial<BookingEmailContext> = {}): BookingEmailContext {
 
 /** Whatever ICU produces locally — hardcoding "12:00 PM" breaks on ICU drift. */
 const timeIn = (ts: number, tz: string): string => formatInZone(ts, tz, { timeStyle: 'short' })
+/** Guest mail is en-GB (24-hour): our guests are mostly European. */
+const guestTimeIn = (ts: number, tz: string): string => formatInZone(ts, tz, { timeStyle: 'short' }, 'en-GB')
 
 describe('the recipient reads their own timezone', () => {
   it('renders the SAME booking differently for guest and host', () => {
@@ -105,7 +107,7 @@ describe('the recipient reads their own timezone', () => {
     const guest = bookingConfirmationForGuest(c)
     const forHost = bookingConfirmationForHost(c)
 
-    expect(guest.text).toContain(timeIn(START, 'Europe/Kyiv'))
+    expect(guest.text).toContain(guestTimeIn(START, 'Europe/Kyiv'))
     expect(forHost.text).toContain(timeIn(START, 'America/New_York'))
     // The point of the whole exercise: same instant, different strings.
     expect(timeIn(START, 'Europe/Kyiv')).not.toBe(timeIn(START, 'America/New_York'))
@@ -320,7 +322,7 @@ describe('the text alternative is genuinely readable', () => {
     const mail = bookingConfirmationForGuest(ctx())
     expect(mail.text.length).toBeGreaterThan(80)
     expect(mail.text).not.toContain('<')
-    expect(mail.text).toContain(timeIn(START, 'Europe/Kyiv'))
+    expect(mail.text).toContain(guestTimeIn(START, 'Europe/Kyiv'))
     expect(mail.text).toContain('Intro call')
     expect(mail.text).toContain('Grace Hopper')
     expect(mail.text).toContain('https://punctual.example/b/bk_1/reschedule?t=abc')
@@ -355,8 +357,8 @@ describe('lifecycle templates', () => {
     expect(mail.subject.startsWith('Rescheduled:')).toBe(true)
     expect(mail.text).toContain('Previously')
     // The guest note names the zone, not just its offset.
-    const oldTime = formatWhen(START, START + 30 * 60_000, 'Europe/Kyiv').replace(/\(GMT/, '(Europe/Kyiv, GMT')
-    const newTime = formatWhen(moved.startUtc, moved.endUtc, 'Europe/Kyiv').replace(/\(GMT/, '(Europe/Kyiv, GMT')
+    const oldTime = formatWhen(START, START + 30 * 60_000, 'Europe/Kyiv', 'en').replace(/\(GMT/, '(Europe/Kyiv, GMT')
+    const newTime = formatWhen(moved.startUtc, moved.endUtc, 'Europe/Kyiv', 'en').replace(/\(GMT/, '(Europe/Kyiv, GMT')
     expect(mail.text).toContain(oldTime)
     expect(mail.text).toContain(newTime)
     // ADR-0005 §4: the old links are dead, and the guest is told so.
@@ -416,7 +418,7 @@ describe('lifecycle templates', () => {
     expect(day.subject.startsWith('Tomorrow:')).toBe(true)
     expect(hour.subject.startsWith('In 1 hour:')).toBe(true)
     expect(day.text).not.toBe(hour.text)
-    for (const mail of [day, hour]) expect(mail.text).toContain(timeIn(START, 'Europe/Kyiv'))
+    for (const mail of [day, hour]) expect(mail.text).toContain(guestTimeIn(START, 'Europe/Kyiv'))
   })
 })
 

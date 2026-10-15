@@ -81,6 +81,8 @@ export const da: Record<MessageKey, string> = {
   'taken.title': 'Den tid blev lige taget',
   'taken.body': 'Nogen nåede at booke den, mens du udfyldte formularen. Her er de andre tider samme dag.',
   'taken.cta': 'Se ledige tider',
+  'bookingDrifted.title': 'Tiden er netop ændret',
+  'bookingDrifted.body': 'Værtens kalender ændrede sig, mens du booker, så tiden er ikke længere ledig. Vælg en anden tid.',
   'calendarUnavailable.title': 'Booking er midlertidigt utilgængelig',
   'calendarUnavailable.body':
     'Vi kan ikke tjekke værtens kalender lige nu, så der vises ingen tider, og der er ikke booket noget. Prøv igen senere, eller kontakt værten.',

@@ -81,6 +81,8 @@ export const en = {
   'taken.title': 'That time was just taken',
   'taken.body': 'Someone booked it while you were filling in the form. Here are the other times that day.',
   'taken.cta': 'See available times',
+  'bookingDrifted.title': 'That time just changed',
+  'bookingDrifted.body': 'The host calendar changed while you were booking, so this time is no longer available. Please pick another time.',
   'calendarUnavailable.title': 'Booking is temporarily unavailable',
   'calendarUnavailable.body':
     'We cannot check the host calendar right now, so no times are shown and nothing has been booked. Please try again later or contact the host.',

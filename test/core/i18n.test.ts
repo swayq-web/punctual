@@ -115,12 +115,12 @@ describe('Danish dates', () => {
     expect(da_).toMatch(/\b14[.:]00\b/) // 14:00 in Copenhagen (CEST), 24-hour clock
     const en_ = formatWhenLong('en', NOON_UTC, 'Europe/Copenhagen')
     expect(en_).toContain('Friday')
-    expect(en_).toContain('2:00')
+    expect(en_).toContain('14:00') // en-GB: 24-hour
   })
 
   it('formats a zone-free date in the locale', () => {
     expect(formatLocalDate('da', '2026-09-04')).toMatch(/fredag/i)
-    expect(formatLocalDate('en', '2026-09-04')).toBe('Friday, September 4')
+    expect(formatLocalDate('en', '2026-09-04')).toBe('Friday 4 September')
   })
 
   it('Danish weeks start on Monday, English on Sunday', () => {

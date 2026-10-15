@@ -149,8 +149,9 @@ function safeUrl(url: string): string | null {
  * has two offsets and no honest single label; the start is the one the reader
  * needs in order to be on time.
  */
-export function formatWhen(startUtc: number, endUtc: number, tz: string, locale: Locale = 'en'): string {
-  const lt = intlTag(locale)
+export function formatWhen(startUtc: number, endUtc: number, tz: string, locale?: Locale): string {
+  // Host mail (no locale) stays en-US; guest mail always passes one.
+  const lt = locale ? intlTag(locale) : 'en-US'
   const date = formatInZone(startUtc, tz, { dateStyle: 'full' }, lt)
   const from = formatInZone(startUtc, tz, { timeStyle: 'short' }, lt)
   const to = formatInZone(endUtc, tz, { timeStyle: 'short' }, lt)
@@ -167,8 +168,8 @@ function formatWhenForGuest(startUtc: number, endUtc: number, tz: string, locale
 }
 
 /** Compact form for subject lines, where the full date eats the preview pane. */
-function formatWhenShort(startUtc: number, tz: string, locale: Locale = 'en'): string {
-  return `${formatInZone(startUtc, tz, { dateStyle: 'medium', timeStyle: 'short' }, intlTag(locale))} (${offsetLabel(startUtc, tz)})`
+function formatWhenShort(startUtc: number, tz: string, locale?: Locale): string {
+  return `${formatInZone(startUtc, tz, { dateStyle: 'medium', timeStyle: 'short' }, locale ? intlTag(locale) : 'en-US')} (${offsetLabel(startUtc, tz)})`
 }
 
 /** The zone the recipient reads in — the whole point of the audience argument. */

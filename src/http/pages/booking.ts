@@ -216,7 +216,9 @@ export function shellFoot(
     // to the upstream project: a guest on a manage page is holding a token and
     // nothing here should send them (or a referrer) anywhere else.
     const mark = wordmarkHtml(guest.brandName)
-    const foot = operator
+    // The company line is dropped when it is just the brand again.
+    const showCompany = operator && operator.trim().toLowerCase() !== guest.brandName.trim().toLowerCase()
+    const foot = showCompany
       ? `<p class="pu-foot">${tHtml(guest.locale, 'foot.withCompany', { company: escapeHtml(operator), mark })}</p>`
       : `<p class="pu-foot">${tHtml(guest.locale, 'foot.scheduling', { mark })}</p>`
     return `</div>
@@ -894,6 +896,10 @@ export function calendarUnavailablePage(locale: Locale = 'en'): string {
 /** An IANA id as a person would say it: `America/New_York` -> `America/New York`. */
 export function tzName(tz: string): string {
   return tz.replace(/_/g, ' ')
+}
+
+export function bookingDriftedPage(locale: Locale = 'en'): string {
+  return errorPage(t(locale, 'bookingDrifted.title'), t(locale, 'bookingDrifted.body'))
 }
 
 export function errorPage(title: string, message: string): string {
