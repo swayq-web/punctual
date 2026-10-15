@@ -104,7 +104,7 @@ export async function notifyBookingCreated(ctx: NotifyContext): Promise<void> {
   // Cloudflare Queues caps a message at 128 KB. A host with many long custom
   // questions can push the .ics past that, and a rejected batch would lose the
   // confirmation ENTIRELY — so the attachment is dropped before the email is.
-  const encoded = ics ? base64(ics) : undefined
+  const encoded = ics && !googleSendsInvite(booking) ? base64(ics) : undefined
   const attachments =
     encoded && encoded.length <= 40_000
       ? [{ filename: 'invite.ics', content: encoded, contentType: 'text/calendar; method=REQUEST' }]
@@ -296,6 +296,8 @@ async function buildAttachment(
   hosts: User[] | undefined,
   method: 'REQUEST' | 'CANCEL',
   url?: string,
+  /** The caller's decision that Google's own invitation or cancellation already covers this change. */
+  suppress = false,
 ): Promise<Array<{ filename: string; content: string; contentType: string }> | undefined> {
   // A booking that has itself been superseded by a later reschedule
   // (`rescheduledTo` set) must never get a CANCEL .ics: its replacement's
@@ -310,6 +312,9 @@ async function buildAttachment(
   // by construction, not by the accident of every call site remembering the
   // status check.
   if (method === 'CANCEL' && icsCancelSuppressed(booking)) return undefined
+  // Google already sent (or will send) the real invitation, update or
+  // cancellation for this booking; a second .ics would disagree with it.
+  if (suppress) return undefined
   try {
     const chain = await loadChain(ports, booking)
     const ics = buildIcs({
@@ -340,6 +345,22 @@ async function buildAttachment(
     console.error('[punctual] ics generation failed', err)
     return undefined
   }
+}
+
+/**
+ * Whether Google itself delivers this booking's invitation, updates and
+ * cancellation to the guest (the Google adapter writes with `sendUpdates=all`).
+ * When it does, punctual must not attach its own .ics: the guest would get two
+ * invitations for one meeting that disagree.
+ *
+ * Decided ONCE, at confirmation, and stored (`bookings.invite_channel`, set in
+ * dispatchConfirmation). Re-deriving it later from connection health or from
+ * which ids are still stored is wrong in both directions: a cancel runs with
+ * the ids already gone, and a never-synced booking never had a Google invite.
+ * A null channel (not yet confirmed, or a legacy row) keeps the .ics.
+ */
+function googleSendsInvite(booking: Booking): boolean {
+  return booking.inviteChannel === 'google'
 }
 
 /**
@@ -400,7 +421,7 @@ export async function notifyBookingCancelled(ctx: {
   // actually removes the meeting from the guest's own calendar. The email copy
   // already claims it has been removed.
   const attachments = await buildAttachment(
-    ports, booking, eventType, host, ctx.hosts, 'CANCEL',
+    ports, booking, eventType, host, ctx.hosts, 'CANCEL', undefined, googleSendsInvite(booking),
   )
 
   await Promise.all([
@@ -457,6 +478,14 @@ export async function notifyBookingRescheduled(ctx: {
     ? `${ports.config.baseUrl}/booking/${booking.id}?token=${encodeURIComponent(ctx.manageToken)}`
     : undefined
 
+  // The rule: suppress our .ics only when Google handles BOTH legs, i.e. the
+  // original was a google-channel booking (its event is deleted, Google tells
+  // the guest it is cancelled) AND the replacement is (Google sends a new
+  // invitation). An ics-channel original keeps the .ics so the guest's old
+  // entry is updated; so does a replacement whose Google event could not be made.
+  const bothGoogle = googleSendsInvite(booking) && googleSendsInvite(ctx.previous)
+  const newInviteFollows = bothGoogle
+
   // Computed before `shared`, not after: the copy claims an invite is
   // attached, and that claim has to be true. A .ics that exceeded the size
   // cap or failed to generate is dropped before the email is (buildAttachment
@@ -465,7 +494,7 @@ export async function notifyBookingRescheduled(ctx: {
   // Same UID as the original, higher SEQUENCE: the client moves the existing
   // event instead of leaving the old time and adding a second one.
   const attachments = await buildAttachment(
-    ports, booking, eventType, host, ctx.hosts, 'REQUEST', manageUrl,
+    ports, booking, eventType, host, ctx.hosts, 'REQUEST', manageUrl, bothGoogle,
   )
 
   const shared = {
@@ -473,6 +502,7 @@ export async function notifyBookingRescheduled(ctx: {
     eventType,
     host,
     ...(ctx.hosts ? { hosts: ctx.hosts } : {}),
+    ...(newInviteFollows ? { newInviteFollows: true } : {}),
     previous: { startUtc: ctx.previous.startUtc, endUtc: ctx.previous.endUtc },
     brandName: ports.config.brandName,
     supportEmail: ports.config.supportEmail,

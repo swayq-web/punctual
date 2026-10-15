@@ -377,10 +377,11 @@ up — point monitoring at `warnings` being non-empty, not at `ok`.
 deployment can turn off. Outlook sends its own meeting request whenever an
 event has attendees, and Microsoft documents that as mandatory with no opt-out
 — so a guest booking with a Microsoft-connected host gets Punctual's
-confirmation *and* Outlook's invite. Google's equivalent is suppressed
-(`sendUpdates=none`), which is why Google guests get one. Punctual's own email
-is the complete one: it carries the meeting link, the answers to your intake
-questions, and the reschedule/cancel links.
+confirmation *and* Outlook's invite. Google guests get Google's own
+invitation instead (`sendUpdates=all`), which carries the Meet link and follows
+every move and cancellation; Punctual attaches no .ics to its email for those
+bookings. Punctual's own email still carries the answers to your intake
+questions and the reschedule/cancel links.
 
 **A co-host sees the meeting as an invitation, not as their own event.**
 By design. A team booking is written once per calendar provider: the first

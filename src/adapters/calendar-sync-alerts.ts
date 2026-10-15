@@ -95,6 +95,7 @@ function failedLines(
         `The booking "${title}" on ${when} was cancelled, but it is still on your calendar.`,
         describeSyncError(category),
         'Remove the event from your calendar by hand so the time shows as free.',
+        "The guest's calendar may still show the meeting too, since the cancellation could not be sent from your calendar. Their cancellation email from us has gone out.",
       ]
     case 'update':
       return [

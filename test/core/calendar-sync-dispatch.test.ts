@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Booking, CalendarConnection, CalendarSyncErrorCategory, EventType, EventTypeHost, User } from '../../src/core/domain/types.js'
 import type { EnginePorts, QueueMessage } from '../../src/ports.js'
 import { handleOne } from '../../src/adapters/queue/consumer.js'
+import { CalendarReconnectRequiredError } from '../../src/adapters/oauth.js'
 
 const MEET = 'https://meet.google.com/abc-defg-hij'
 
@@ -138,11 +139,12 @@ function harness(opts: HarnessOptions = {}) {
           if (id === store.booking.id) return store.booking
           return store.previous && id === store.previous.id ? store.previous : null
         },
-        async setSyncResult(_id: string, ids: Record<string, string>, conferenceUrl: string | null) {
-          store.booking = { ...store.booking, externalEventIds: ids, conferenceUrl }
+        async setSyncResult(_id: string, ids: Record<string, string>, conferenceUrl: string | null, calendars?: Record<string, string>) {
+          store.booking = { ...store.booking, externalEventIds: ids, conferenceUrl, ...(calendars ? { externalEventCalendars: calendars } : {}) }
         },
-        async setExternalEventIds(_id: string, ids: Record<string, string>) {
-          store.booking = { ...store.booking, externalEventIds: ids }
+        async setExternalEventIds(id: string, ids: Record<string, string>) {
+          if (store.previous && id === store.previous.id) store.previous = { ...store.previous, externalEventIds: ids }
+          else store.booking = { ...store.booking, externalEventIds: ids }
         },
         async claimConfirmation() {
           if (claimed) return false
@@ -744,5 +746,99 @@ describe('an update after a host change (booking-hosts.ts)', () => {
     await handleOne({ ...h.sync, action: 'update' }, h.ports)
     expect(h.createEvent).toHaveBeenCalledTimes(1)
     expect(h.updateEvent).toHaveBeenCalledTimes(3)
+  })
+})
+
+/**
+ * SWA-1287: Google is the invite channel. Each booking owns its own event
+ * lifecycle: a reschedule is the original's delete (Google tells the guest the
+ * old slot is cancelled) plus the replacement's create (Google sends the new
+ * invitation). No event is shared across bookings.
+ */
+describe('Google-channel reschedule and cancel', () => {
+  const oldLeg = (over: Partial<Booking> = {}): Booking => ({
+    ...h0().store.booking,
+    id: 'bk_old',
+    status: 'rescheduled' as Booking['status'],
+    rescheduledTo: 'bk_1',
+    inviteChannel: 'google',
+    externalEventIds: { conn_1: 'evt_old' },
+    externalEventCalendars: { conn_1: 'old-cal' },
+    conferenceUrl: MEET,
+    ...over,
+  })
+  const mails = (h: ReturnType<typeof harness>) => h.emails() as Array<Extract<QueueMessage, { kind: 'email' }>>
+
+  it('the original deletes its OWN event from the calendar it was written to; the replacement creates a new one', async () => {
+    const h = harness({ bookingPatch: { ...oldLeg(), id: 'bk_old' } })
+    await handleOne({ kind: 'calendar.sync', bookingId: 'bk_old', action: 'delete' }, h.ports)
+    expect(h.deleteEvent).toHaveBeenCalledTimes(1)
+    expect(h.deleteEvent.mock.calls[0]).toEqual([expect.objectContaining({ id: 'conn_1' }), 'evt_old', 'old-cal'])
+    expect(h.store.booking.externalEventIds).toEqual({})
+
+    const r = harness({ bookingPatch: { id: 'bk_1', rescheduleOf: 'bk_old' } })
+    r.setPrevious(oldLeg())
+    await handleOne(r.sync, r.ports)
+    expect(r.createEvent).toHaveBeenCalledTimes(1)
+    expect(r.updateEvent).not.toHaveBeenCalled()
+    expect(r.deleteEvent).not.toHaveBeenCalled()
+    expect(r.store.booking.inviteChannel).toBe('google')
+  })
+
+  it('the moved mail carries no .ics and says the old invitation is cancelled and a new one follows', async () => {
+    const h = harness({ bookingPatch: { id: 'bk_1', rescheduleOf: 'bk_old' } })
+    h.setPrevious(oldLeg())
+    await handleOne(h.sync, h.ports)
+    expect(mails(h).length).toBe(2)
+    for (const m of mails(h)) expect(m.message.attachments).toBeUndefined()
+    const guest = mails(h).find((m) => m.message.to === 'ada@example.com')!
+    expect(guest.message.text).toContain('cancelling your old calendar invitation')
+  })
+
+  it('an ics-channel original keeps the .ics on the moved mail', async () => {
+    const h = harness({ bookingPatch: { id: 'bk_1', rescheduleOf: 'bk_old' } })
+    h.setPrevious(oldLeg({ inviteChannel: 'ics' }))
+    await handleOne(h.sync, h.ports)
+    for (const m of mails(h)) expect(m.message.attachments?.[0]?.filename).toBe('invite.ics')
+  })
+
+  it('a redelivered create makes no second event and no second mail', async () => {
+    const h = harness({ bookingPatch: { id: 'bk_1', rescheduleOf: 'bk_old' } })
+    h.setPrevious(oldLeg())
+    await handleOne(h.sync, h.ports)
+    await handleOne(h.sync, h.ports)
+    expect(h.createEvent).toHaveBeenCalledTimes(1)
+    expect(mails(h).length).toBe(2)
+  })
+
+  it('update (host change) also targets the calendar the event was written to', async () => {
+    const h = harness({
+      bookingPatch: { externalEventIds: { conn_1: 'evt_1' }, externalEventCalendars: { conn_1: 'old-cal' } },
+      connections: [connection({ calendarIdWrite: 'new-cal' })],
+    })
+    await handleOne({ ...h.sync, action: 'update' }, h.ports)
+    expect((h.updateEvent.mock.calls[0] as unknown[])[3]).toBe('old-cal')
+  })
+
+  it('a permanent delete failure sends the guest no extra mail and alerts the host that the guest calendar may still show it', async () => {
+    const h = harness({ bookingPatch: { status: 'cancelled', inviteChannel: 'google', externalEventIds: { conn_1: 'evt_1' } } })
+    h.deleteEvent.mockRejectedValue(new CalendarReconnectRequiredError('google', 'conn_1', 'revoked'))
+    const del = { ...h.sync, action: 'delete' } as const
+    await handleOne(del, h.ports)
+    await handleOne(del, h.ports)
+
+    expect(mails(h).filter((m) => m.message.attachments?.length)).toHaveLength(0)
+    expect(mails(h).some((m) => m.message.to === 'ada@example.com')).toBe(false)
+    const alerts = mails(h).filter((m) => m.message.to === 'grace@example.com')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.message.text).toContain("guest's calendar may still show")
+  })
+
+  it('a deleted connection row is a permanent failure with a host alert, and the stored id is kept', async () => {
+    const h = harness({ bookingPatch: { status: 'cancelled', inviteChannel: 'google', externalEventIds: { conn_gone: 'evt_1' } } })
+    await handleOne({ ...h.sync, action: 'delete' }, h.ports)
+    expect(h.store.booking.externalEventIds).toEqual({ conn_gone: 'evt_1' })
+    expect(h.store.booking.calendarSyncStatus).toBe('failed')
+    expect(mails(h).filter((m) => m.message.to === 'grace@example.com')).toHaveLength(1)
   })
 })

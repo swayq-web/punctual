@@ -635,8 +635,12 @@ export interface CalendarProvider {
   /** Raw busy intervals, never buffer-expanded — buffers belong to the slot engine. */
   getBusy(conn: CalendarConnection, range: Interval): Promise<Interval[]>
   createEvent(conn: CalendarConnection, event: ExternalEvent): Promise<CreatedEvent>
-  updateEvent(conn: CalendarConnection, externalId: string, event: ExternalEvent): Promise<void>
-  deleteEvent(conn: CalendarConnection, externalId: string): Promise<void>
+  /**
+   * `calendarId` is the calendar the event was WRITTEN to (`externalEventCalendars`);
+   * absent only for an event that predates that record, then the write calendar.
+   */
+  updateEvent(conn: CalendarConnection, externalId: string, event: ExternalEvent, calendarId?: string): Promise<void>
+  deleteEvent(conn: CalendarConnection, externalId: string, calendarId?: string): Promise<void>
   /**
    * Read back one event this engine wrote, for the drift check
    * (adapters/scheduled.ts). `null` means it is gone: deleted, or cancelled

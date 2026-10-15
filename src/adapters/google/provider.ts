@@ -80,9 +80,12 @@ export function createGoogleProvider(deps: CalendarProviderDeps): CalendarProvid
 
       const url = new URL(`${API}/calendars/${encodeURIComponent(calendarId)}/events`)
       url.searchParams.set('conferenceDataVersion', '1')
-      // Punctual sends the confirmation email itself; letting Google send one
-      // too gives the guest two invitations that disagree about branding.
-      url.searchParams.set('sendUpdates', 'none')
+      // Google sends the guest's invitation (with the Meet link) and every
+      // later change or cancel, so the event on their calendar is the one the
+      // organizer's calendar holds. Punctual's own mail no longer attaches an
+      // .ics for a Google-hosted booking (adapters/notify.ts), which is what
+      // keeps this from being a second, disagreeing invitation.
+      url.searchParams.set('sendUpdates', 'all')
 
       const body = toGoogleEvent(event, requestId)
       if (stable) body['id'] = stable.googleEventId
@@ -124,15 +127,16 @@ export function createGoogleProvider(deps: CalendarProviderDeps): CalendarProvid
       return { id: created['id'] }
     },
 
-    async updateEvent(conn, externalId, event) {
-      const calendarId = writeCalendar(conn.calendarIdWrite, conn.id)
+    async updateEvent(conn, externalId, event, writtenTo) {
+      const calendarId = writtenTo ?? writeCalendar(conn.calendarIdWrite, conn.id)
       const url = new URL(
         `${API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(externalId)}`,
       )
       // Version 1 on writes too: at version 0 Google assumes the client cannot
       // represent conferenceData and drops the Meet link from the event.
       url.searchParams.set('conferenceDataVersion', '1')
-      url.searchParams.set('sendUpdates', 'none')
+      // `all`: attendees get Google's own update when the time moves.
+      url.searchParams.set('sendUpdates', 'all')
 
       // PATCH, not PUT, and no `createRequest` — a reschedule must move the
       // existing conference, not mint a second one and invalidate the link
@@ -145,12 +149,14 @@ export function createGoogleProvider(deps: CalendarProviderDeps): CalendarProvid
       await expectOk(conn, res, 'events.patch')
     },
 
-    async deleteEvent(conn, externalId) {
-      const calendarId = writeCalendar(conn.calendarIdWrite, conn.id)
+    async deleteEvent(conn, externalId, writtenTo) {
+      const calendarId = writtenTo ?? writeCalendar(conn.calendarIdWrite, conn.id)
       const url = new URL(
         `${API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(externalId)}`,
       )
-      url.searchParams.set('sendUpdates', 'none')
+      // `all`: attendees get Google's own cancellation, which removes the
+      // event from their calendar (punctual attaches no CANCEL .ics here).
+      url.searchParams.set('sendUpdates', 'all')
 
       const res = await providerFetch(deps, conn, url.toString(), { method: 'DELETE' })
       // Already gone is the desired state. A host who deleted the event by hand

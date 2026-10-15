@@ -163,6 +163,8 @@ export const da: Record<MessageKey, string> = {
   'email.cancelled.intro': '{guest}, dit møde med {host} er aflyst.',
   'email.cta.reschedule': 'Flyt mødet',
   'email.cta.cancel': 'Aflys',
+  'email.rescheduled.introNewInvite': '{guest}, Dit møde med {host} har fået et nyt tidspunkt. Google aflyser din gamle kalenderinvitation og sender en ny med et nyt mødelink.',
+  'email.newInvitationNote': 'Google sender dig en ny kalenderinvitation med et nyt mødelink.',
   'email.updatedInvitationNote': 'Google sender dig en opdateret kalenderinvitation.',
   'email.oldLinks': 'Linkene i den tidligere bekræftelse virker ikke længere. Brug dem herover.',
   'email.cta.bookAgain': 'Book et nyt tidspunkt',
