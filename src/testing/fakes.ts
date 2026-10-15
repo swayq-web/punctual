@@ -14,6 +14,7 @@ import type { Interval,
   Booking,
   CalendarConnection,
   CalendarSyncErrorCategory,
+  InviteChannel,
   MagicLinkToken,
   Schedule,
   Session,
@@ -297,9 +298,16 @@ export function createFakeRepositories(): FakeRepositories {
       const existing = bookings.get(bookingId)
       if (existing) bookings.set(bookingId, { ...existing, externalEventIds: ids })
     },
-    async setSyncResult(bookingId: string, ids: Record<string, string>, conferenceUrl: string | null) {
+    async setSyncResult(bookingId: string, ids: Record<string, string>, conferenceUrl: string | null, calendars?: Record<string, string>) {
       const existing = bookings.get(bookingId)
-      if (existing) bookings.set(bookingId, { ...existing, externalEventIds: ids, conferenceUrl })
+      if (existing) {
+        bookings.set(bookingId, {
+          ...existing,
+          externalEventIds: ids,
+          conferenceUrl,
+          ...(calendars ? { externalEventCalendars: calendars } : {}),
+        })
+      }
     },
     // Host columns only. The fake keeps no slot_locks, so the bucket
     // arguments are ignored and a conflict is never reported here — that
@@ -333,19 +341,20 @@ export function createFakeRepositories(): FakeRepositories {
     async markCalendarSynced(bookingId: string, at: number, opts?: { clearDrift?: boolean }) {
       const b = bookings.get(bookingId)
       if (!b || (b.calendarSyncStatus === 'drifted' && !opts?.clearDrift)) return
-      bookings.set(bookingId, { ...b, calendarSyncStatus: 'synced', calendarSyncError: null, calendarSyncedAt: at })
+      bookings.set(bookingId, { ...b, calendarSyncStatus: 'synced', calendarSyncError: null, calendarSyncedAt: at, calendarSyncUpdatedAt: at })
     },
-    async recordCalendarSyncRetry(bookingId: string, category: CalendarSyncErrorCategory) {
+    async recordCalendarSyncRetry(bookingId: string, category: CalendarSyncErrorCategory, at: number) {
       const b = bookings.get(bookingId)
-      if (!b) return
+      const status = b?.calendarSyncStatus ?? 'pending'
+      if (!b || (status !== 'pending' && status !== 'failed')) return
       bookings.set(bookingId, {
         ...b,
         calendarSyncAttempts: (b.calendarSyncAttempts ?? 0) + 1,
         calendarSyncError: category,
-        calendarSyncStatus: b.calendarSyncStatus === 'failed' ? 'failed' : 'pending',
+        calendarSyncUpdatedAt: at,
       })
     },
-    async markCalendarSyncFailed(bookingId: string, category: CalendarSyncErrorCategory | null, opts?: { fromPendingOnly?: boolean }) {
+    async markCalendarSyncFailed(bookingId: string, category: CalendarSyncErrorCategory | null, opts?: { fromPendingOnly?: boolean; at?: number }) {
       const b = bookings.get(bookingId)
       if (!b || b.calendarSyncStatus === 'failed') return false
       if (opts?.fromPendingOnly && (b.calendarSyncStatus ?? 'pending') !== 'pending') return false
@@ -354,8 +363,32 @@ export function createFakeRepositories(): FakeRepositories {
         calendarSyncStatus: 'failed',
         calendarSyncAttempts: (b.calendarSyncAttempts ?? 0) + 1,
         calendarSyncError: category ?? b.calendarSyncError ?? 'retries_exhausted',
+        calendarSyncUpdatedAt: opts?.at ?? b.calendarSyncUpdatedAt ?? null,
       })
       return true
+    },
+    async reopenCalendarSync(bookingId: string, at: number) {
+      const b = bookings.get(bookingId)
+      if (!b || b.calendarSyncStatus !== 'failed' || b.status !== 'confirmed') return false
+      bookings.set(bookingId, { ...b, calendarSyncStatus: 'pending', calendarSyncUpdatedAt: at })
+      return true
+    },
+    async listFailedNeedingReconnect(hostUserId: string, now: number, limit: number) {
+      return [...bookings.values()]
+        .filter(
+          (b) =>
+            (b.hostUserId === hostUserId || b.hostUserIds.includes(hostUserId)) &&
+            b.status === 'confirmed' &&
+            b.startUtc > now &&
+            b.calendarSyncStatus === 'failed' &&
+            b.calendarSyncError === 'needs_reconnect',
+        )
+        .sort((a, b) => a.startUtc - b.startUtc)
+        .slice(0, limit)
+    },
+    async setInviteChannel(bookingId: string, channel: InviteChannel) {
+      const b = bookings.get(bookingId)
+      if (b) bookings.set(bookingId, { ...b, inviteChannel: channel })
     },
     async markCalendarDrifted(bookingId: string) {
       const b = bookings.get(bookingId)
@@ -367,7 +400,7 @@ export function createFakeRepositories(): FakeRepositories {
       const b = bookings.get(bookingId)
       if (b && b.calendarSyncStatus === 'synced') bookings.set(bookingId, { ...b, calendarSyncedAt: at })
     },
-    async listStuckCalendarSyncs(now: number, createdBefore: number, limit: number) {
+    async listStuckCalendarSyncs(now: number, createdBefore: number, limit: number, retryActiveSince: number) {
       return [...bookings.values()]
         .filter(
           (b) =>
@@ -375,7 +408,8 @@ export function createFakeRepositories(): FakeRepositories {
             b.status === 'confirmed' &&
             b.startUtc > now &&
             Object.keys(b.externalEventIds).length === 0 &&
-            b.createdAt < createdBefore,
+            b.createdAt < createdBefore &&
+            !((b.calendarSyncAttempts ?? 0) > 0 && (b.calendarSyncUpdatedAt ?? 0) >= retryActiveSince),
         )
         .sort((a, b) => a.startUtc - b.startUtc)
         .slice(0, limit)

@@ -31,6 +31,28 @@ ALTER TABLE bookings ADD COLUMN calendar_sync_error TEXT;
 -- check works through the oldest-verified bookings first.
 ALTER TABLE bookings ADD COLUMN calendar_synced_at INTEGER;
 
+-- When the sync state last changed (a retry recorded, failed, synced). The
+-- reconciler leaves a booking alone while its own retry chain is still
+-- running: attempts > 0 and touched in the last 20 minutes.
+ALTER TABLE bookings ADD COLUMN calendar_sync_updated_at INTEGER;
+
+-- Which calendar each stored event was written to, keyed like
+-- external_event_ids_json (connection id -> calendar id). The drift check
+-- reads an event from the calendar it was written to, not from the host's
+-- CURRENT write calendar: after a host repoints their write calendar, every
+-- older event would otherwise read as 404 and be reported as deleted.
+-- '{}' for older rows: unknown, and a 404 against an unknown calendar is
+-- never taken as a deletion.
+ALTER TABLE bookings ADD COLUMN external_event_calendars_json TEXT NOT NULL DEFAULT '{}';
+
+-- How the guest's confirmation reached them: 'google' when a Google event
+-- (which can carry Google's own invitation) existed for the booking at the
+-- moment the confirmation was sent, else 'ics' (the email's attachment).
+-- Cancel and reschedule notifications follow the same channel. NULL until
+-- the confirmation is sent, and for every booking before this migration.
+ALTER TABLE bookings ADD COLUMN invite_channel TEXT
+  CHECK (invite_channel IS NULL OR invite_channel IN ('google', 'ics'));
+
 -- The guest's language for their emails and pages (e.g. 'en', 'da'). NULL
 -- means "not recorded", which every reader treats as the deployment default.
 -- Written by the booking flow; this migration only makes room for it.

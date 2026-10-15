@@ -20,7 +20,12 @@ import { escapeHtml } from '../core/email-templates.js'
 import { formatInZone } from '../core/time/zone.js'
 
 export type CalendarSyncAlert =
-  | { kind: 'failed'; category: CalendarSyncErrorCategory | null | undefined }
+  | {
+      kind: 'failed'
+      category: CalendarSyncErrorCategory | null | undefined
+      /** Which write failed: the advice differs (add it by hand, update it by hand, remove it). Absent reads as create. */
+      action?: 'create' | 'update' | 'delete'
+    }
   | { kind: 'drifted'; reason: 'moved' | 'deleted' }
 
 export async function alertCalendarSync(
@@ -54,11 +59,7 @@ export async function alertCalendarSync(
         : `Meeting changed outside ${ports.config.brandName}: ${title}, ${when}`
     const lines =
       alert.kind === 'failed'
-        ? [
-            `The booking "${title}" on ${when} is confirmed, but it could not be written to the calendar.`,
-            describeSyncError(alert.category),
-            'The guest has their confirmation email. Check the booking and add it to your calendar by hand if needed.',
-          ]
+        ? failedLines(alert.action ?? 'create', title, when, alert.category)
         : [
             alert.reason === 'deleted'
               ? `The calendar event for "${title}" on ${when} was deleted from the calendar, but the booking is still confirmed here.`
@@ -74,5 +75,38 @@ export async function alertCalendarSync(
       kind: 'email',
       message: { to: user.email, ...(user.name ? { toName: user.name } : {}), subject, html, text },
     })
+  }
+}
+
+/**
+ * The failed alert, per write. A failed DELETE is the opposite problem to a
+ * failed create: the meeting is cancelled but its event is still on the
+ * calendar, so "add it by hand" would be exactly wrong.
+ */
+function failedLines(
+  action: 'create' | 'update' | 'delete',
+  title: string,
+  when: string,
+  category: CalendarSyncErrorCategory | null | undefined,
+): string[] {
+  switch (action) {
+    case 'delete':
+      return [
+        `The booking "${title}" on ${when} was cancelled, but it is still on your calendar.`,
+        describeSyncError(category),
+        'Remove the event from your calendar by hand so the time shows as free.',
+      ]
+    case 'update':
+      return [
+        `The booking "${title}" on ${when} changed, but the calendar event could not be updated to match.`,
+        describeSyncError(category),
+        'Check the event on your calendar and update it by hand if needed.',
+      ]
+    case 'create':
+      return [
+        `The booking "${title}" on ${when} is confirmed, but it could not be written to the calendar.`,
+        describeSyncError(category),
+        'The guest has their confirmation email. Check the booking and add it to your calendar by hand if needed.',
+      ]
   }
 }

@@ -271,9 +271,25 @@ export interface Booking {
   calendarSyncError?: CalendarSyncErrorCategory | null
   /** When the events were last known to match this booking. */
   calendarSyncedAt?: number | null
+  /** When the sync state last changed; the reconciler skips a booking mid-retry. */
+  calendarSyncUpdatedAt?: number | null
+  /**
+   * The calendar each stored event was written to, keyed like
+   * `externalEventIds` (connection id -> calendar id). Absent for a key means
+   * unknown (an event written before migration 0018).
+   */
+  externalEventCalendars?: Record<string, string>
+  /**
+   * How the guest's confirmation reached them, recorded when it was sent:
+   * 'google' when a Google event existed for the booking then, else 'ics'.
+   * Cancel and reschedule notifications follow it. Null until sent.
+   */
+  inviteChannel?: InviteChannel | null
   /** The guest's language (e.g. 'en', 'da'); null or absent means the deployment default. */
   guestLocale?: string | null
 }
+
+export type InviteChannel = 'google' | 'ics'
 
 export type CalendarSyncStatus = 'pending' | 'synced' | 'failed' | 'drifted'
 

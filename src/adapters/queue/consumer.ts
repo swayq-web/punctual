@@ -8,7 +8,8 @@
  */
 
 import type { EnginePorts, ExternalEvent, QueueMessage, Repositories } from '../../ports.js'
-import type { Booking, CalendarConnection, CalendarSyncErrorCategory, EventType, User } from '../../core/domain/types.js'
+import type { Booking, CalendarConnection, CalendarSyncErrorCategory, EventType, InviteChannel, User } from '../../core/domain/types.js'
+import { issueManageToken } from '../../core/domain/auth-flows.js'
 import { calendarDescription, calendarTitle, participantsFor, type Participant } from '../../core/domain/calendar-text.js'
 import { hostSettings } from '../../core/domain/hosts.js'
 import { channelAad, chatMessage, type ChannelConfig } from '../../core/domain/chat-notify.js'
@@ -120,7 +121,7 @@ export async function handleDeadLetter(msg: QueueMessage, ports: EnginePorts): P
   // A create for a booking that was cancelled meanwhile was moot anyway.
   if (msg.action === 'create' && booking.status !== 'confirmed') return
 
-  if (await repos.bookings.markCalendarSyncFailed(booking.id, null, { fromPendingOnly: true })) {
+  if (await repos.bookings.markCalendarSyncFailed(booking.id, null, { fromPendingOnly: true, at: ports.clock.now() })) {
     const failed = (await repos.bookings.byId(booking.id)) ?? booking
     logSync('error', {
       event: 'sync_failed',
@@ -128,7 +129,7 @@ export async function handleDeadLetter(msg: QueueMessage, ports: EnginePorts): P
       stage: 'dead_letter',
       category: failed.calendarSyncError ?? 'retries_exhausted',
     })
-    await alertCalendarSync(ports, repos, failed, { kind: 'failed', category: failed.calendarSyncError }).catch(() =>
+    await alertCalendarSync(ports, repos, failed, { kind: 'failed', category: failed.calendarSyncError, action: msg.action }).catch(() =>
       logSync('error', { event: 'alert_not_sent', bookingId: booking.id, stage: 'dead_letter' }),
     )
   }
@@ -296,16 +297,16 @@ async function syncCalendar(
   const settle = async (opts: { clearDrift: boolean }): Promise<'synced' | 'failed' | 'retry'> => {
     const retryable = failures.find((f) => isRetryableCategory(f.category))
     if (retryable) {
-      await repos.bookings.recordCalendarSyncRetry(booking.id, retryable.category)
+      await repos.bookings.recordCalendarSyncRetry(booking.id, retryable.category, ports.clock.now())
       logSync('warn', { event: 'retry_scheduled', bookingId: booking.id, stage, category: retryable.category, ...attempt })
       return 'retry'
     }
     const permanent = failures[0]
     if (permanent) {
-      if (await repos.bookings.markCalendarSyncFailed(booking.id, permanent.category)) {
+      if (await repos.bookings.markCalendarSyncFailed(booking.id, permanent.category, { at: ports.clock.now() })) {
         logSync('error', { event: 'sync_failed', bookingId: booking.id, stage, category: permanent.category, ...attempt })
         const current = (await repos.bookings.byId(booking.id)) ?? booking
-        await alertCalendarSync(ports, repos, current, { kind: 'failed', category: permanent.category }).catch(() =>
+        await alertCalendarSync(ports, repos, current, { kind: 'failed', category: permanent.category, action: stage }).catch(() =>
           logSync('error', { event: 'alert_not_sent', bookingId: booking.id, stage }),
         )
       }
@@ -327,6 +328,9 @@ async function syncCalendar(
   if (!eventType && msg.action !== 'delete') return
   // Accumulated across every provider, then persisted once.
   const createdIds: Record<string, string> = { ...booking.externalEventIds }
+  // Which calendar each event went to, so the drift check reads it back
+  // from there and not from whatever the host's write calendar is later.
+  const createdCalendars: Record<string, string> = { ...booking.externalEventCalendars }
 
   // ---- delete: the stored events, whatever shape they were written in ----
   if (msg.action === 'delete') {
@@ -360,6 +364,17 @@ async function syncCalendar(
   if (!eventType) return
 
   const plan = await planInvites(repos, booking, eventType)
+
+  // A host whose only write-capable calendar connection is broken drops out
+  // of the plan (it keeps `syncStatus === 'ok'` connections only), so without
+  // this the pass "succeeds" with nothing written and the booking reads
+  // `synced` while no event exists on that host's calendar. Recorded as a
+  // permanent `needs_reconnect` failure: alerted once, and re-driven when
+  // the host reconnects (adapters/calendar-sync-redrive.ts).
+  for (const blocked of await hostsWithBrokenCalendars(repos, booking)) {
+    failures.push({ connectionId: blocked.id, category: 'needs_reconnect' })
+    logSync('warn', { event: 'host_calendar_unusable', bookingId: booking.id, stage, category: 'needs_reconnect', connectionId: blocked.id, provider: blocked.provider, ...attempt })
+  }
 
   // The first conference link any provider minted. One per booking, not per
   // event: it is the link the GUEST is told to join, and a guest has one
@@ -424,6 +439,7 @@ async function syncCalendar(
         // Keep the id: reschedule and cancel need it, and without it a
         // cancelled meeting stays on the host's real calendar forever.
         createdIds[conn.id] = result.id
+        if (conn.calendarIdWrite) createdCalendars[conn.id] = conn.calendarIdWrite
         freshlyCreated.push({ conn, externalId: result.id })
         // Captured on the first event that mints one; `createConference`
         // above is false from here on, so nothing re-mints.
@@ -513,7 +529,7 @@ async function syncCalendar(
     await createMissing(plan.events.filter((t) => !anchor.has(t.conn.provider)))
     if (freshlyCreated.length > 0) {
       if (await abandonedIfCancelled()) return
-      await repos.bookings.setSyncResult(booking.id, createdIds, conferenceUrl)
+      await repos.bookings.setSyncResult(booking.id, createdIds, conferenceUrl, createdCalendars)
     }
     // An update rewrites every stored event from the booking as it is now,
     // so a clean pass puts a drifted booking back in line.
@@ -534,7 +550,7 @@ async function syncCalendar(
     const changed =
       JSON.stringify(createdIds) !== JSON.stringify(booking.externalEventIds) ||
       conferenceUrl !== booking.conferenceUrl
-    if (changed) await repos.bookings.setSyncResult(booking.id, createdIds, conferenceUrl)
+    if (changed) await repos.bookings.setSyncResult(booking.id, createdIds, conferenceUrl, createdCalendars)
 
     // A redelivered create that wrote nothing has not looked at the
     // calendar, so it must not clear a drift the reconciler recorded.
@@ -646,6 +662,30 @@ async function planInvites(
   return { events, organizerTz, participants, currentAttendees }
 }
 
+/**
+ * For each booking host whose write-capable connections (a write calendar
+ * chosen) are ALL unusable (`needs_reconnect` or `error`), one of those
+ * connections. A host with no write calendar at all chose not to have
+ * bookings written and is not reported; a host with one healthy connection
+ * among broken ones still gets the event through the healthy one.
+ */
+async function hostsWithBrokenCalendars(repos: Repositories, booking: Booking): Promise<CalendarConnection[]> {
+  const out: CalendarConnection[] = []
+  for (const id of booking.hostUserIds.length > 0 ? booking.hostUserIds : [booking.hostUserId]) {
+    const writeCapable = (await repos.connections.listForUser(id)).filter((c) => c.calendarIdWrite)
+    if (writeCapable.length > 0 && !writeCapable.some((c) => c.syncStatus === 'ok')) out.push(writeCapable[0]!)
+  }
+  return out
+}
+
+/** 'google' iff one of the booking's stored events lives on a Google connection. */
+async function inviteChannelFor(repos: Repositories, booking: Booking): Promise<InviteChannel> {
+  for (const connId of Object.keys(booking.externalEventIds)) {
+    if ((await repos.connections.byId(connId))?.provider === 'google') return 'google'
+  }
+  return 'ics'
+}
+
 /** A pre-ADR-0011 event's attendee list: the guest and the connection's own host. */
 async function legacyAttendees(
   repos: Repositories,
@@ -732,6 +772,26 @@ export async function dispatchConfirmation(
   // confirmed — and the retry would then send that guest a second
   // confirmation for a meeting they already know about.
   try {
+    // No token on the message means nobody holds a link for this booking:
+    // the reconciler re-enqueued a create whose original message never ran
+    // (only the token's HASH is stored, so the raw one is gone). Issue a
+    // fresh one so this confirmation carries a working manage link. Only
+    // here, after winning the claim: the normal path always carries the
+    // coordinator's token, and rotating that would kill the link the
+    // just-booked page is showing (see the doc comment above).
+    if (!manageToken) {
+      const issued = await issueManageToken({ crypto: ports.crypto }, booking, 'manage')
+      await repos.bookings.rotateManageToken(booking.id, issued.tokenHash)
+      manageToken = issued.token
+      logSync('info', { event: 'manage_token_reissued', bookingId: booking.id, stage: 'create' })
+    }
+
+    // How this confirmation reaches the guest, recorded as it is sent, so a
+    // later cancel or reschedule can follow the same channel: 'google' when
+    // a Google event for the booking exists right now (it can carry
+    // Google's own invitation), else 'ics' (the attachment on this email).
+    await repos.bookings.setInviteChannel(booking.id, await inviteChannelFor(repos, booking))
+
     if (previous) {
       await notifyBookingRescheduled({
         ports,

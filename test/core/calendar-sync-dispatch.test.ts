@@ -151,6 +151,9 @@ function harness(opts: HarnessOptions = {}) {
         },
         async rotateManageToken() { rotated = true },
         async releaseConfirmationClaim() { claimed = false },
+        async setInviteChannel(_id: string, channel: 'google' | 'ics') {
+          store.booking = { ...store.booking, inviteChannel: channel }
+        },
         // Calendar sync state (migration 0018), with the D1 adapter's conditions.
         async markCalendarSynced(_id: string, at: number, o?: { clearDrift?: boolean }) {
           if (store.booking.calendarSyncStatus === 'drifted' && !o?.clearDrift) return

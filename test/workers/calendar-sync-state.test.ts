@@ -116,7 +116,7 @@ describe('conditional state moves (real SQL)', () => {
 
   it('a dead-letter give-up keeps the last category, or falls back to retries_exhausted', async () => {
     await insert(booking('bk_dlq'))
-    await repos().bookings.recordCalendarSyncRetry('bk_dlq', 'rate_limited')
+    await repos().bookings.recordCalendarSyncRetry('bk_dlq', 'rate_limited', NOW)
     expect(await repos().bookings.markCalendarSyncFailed('bk_dlq', null, { fromPendingOnly: true })).toBe(true)
     expect(await repos().bookings.byId('bk_dlq')).toMatchObject({ calendarSyncError: 'rate_limited', calendarSyncAttempts: 2 })
 
@@ -140,7 +140,7 @@ describe('conditional state moves (real SQL)', () => {
   it('the reconciler queries select what they promise', async () => {
     await insert(booking('bk_stuck', { createdAt: NOW - 20 * 60_000 }))
     await insert(booking('bk_fresh', { createdAt: NOW - 60_000 }))
-    const stuck = (await repos().bookings.listStuckCalendarSyncs(NOW, NOW - 10 * 60_000, 100)).map((b) => b.id)
+    const stuck = (await repos().bookings.listStuckCalendarSyncs(NOW, NOW - 10 * 60_000, 100, NOW - 20 * 60_000)).map((b) => b.id)
     expect(stuck).toContain('bk_stuck')
     expect(stuck).not.toContain('bk_fresh')
     expect(stuck).not.toContain('bk_fail')

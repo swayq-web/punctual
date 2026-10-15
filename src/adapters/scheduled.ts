@@ -161,6 +161,12 @@ export async function sendDigests(ports: EnginePorts, now: number): Promise<void
 
 /** A create sync that has not landed after this long is presumed lost. */
 export const STUCK_SYNC_AFTER = 10 * MINUTE
+/**
+ * A booking that has failed at least once and whose sync state moved within
+ * this window is still inside its own queue retry chain (backoff tops out at
+ * 10 minutes, six deliveries), so the reconciler leaves it to that chain.
+ */
+export const RETRY_CHAIN_QUIET = 20 * MINUTE
 /** Re-enqueued per tick, at most. */
 export const STUCK_SYNC_BATCH = 25
 /** How far ahead the drift check looks. Past meetings cannot be fixed. */
@@ -195,7 +201,7 @@ export async function reconcileCalendarSync(ports: EnginePorts, now: number): Pr
  */
 export async function requeueStuckSyncs(ports: EnginePorts, now: number): Promise<void> {
   const repos = ports.repositories({ consistency: 'bookmark' })
-  const stuck = await repos.bookings.listStuckCalendarSyncs(now, now - STUCK_SYNC_AFTER, STUCK_SYNC_BATCH)
+  const stuck = await repos.bookings.listStuckCalendarSyncs(now, now - STUCK_SYNC_AFTER, STUCK_SYNC_BATCH, now - RETRY_CHAIN_QUIET)
   for (const booking of stuck) {
     try {
       await ports.queue.send({ kind: 'calendar.sync', bookingId: booking.id, action: 'create' })
@@ -253,11 +259,22 @@ export async function checkCalendarDrift(ports: EnginePorts, now: number): Promi
         verdict = 'unknown'
         continue
       }
+      // Read from the calendar the event was written to. A 404 is evidence
+      // of a deletion only when that calendar is known AND is still the
+      // host's write calendar: an event written before migration 0018 has
+      // no recorded calendar, and a host who repointed their write calendar
+      // makes every older event look missing from the new one. Either way a
+      // false "deleted" would refuse the guest's manage link, so: unknown.
+      const writtenTo = booking.externalEventCalendars?.[connectionId]
       try {
-        const snapshot = await provider.getEvent(conn, externalId)
+        const snapshot = await provider.getEvent(conn, externalId, writtenTo)
         if (snapshot === null) {
-          verdict = 'deleted'
-          break
+          if (writtenTo !== undefined && writtenTo === conn.calendarIdWrite) {
+            verdict = 'deleted'
+            break
+          }
+          verdict = 'unknown'
+          continue
         }
         if (snapshot.start !== booking.startUtc || snapshot.end !== booking.endUtc) {
           verdict = 'moved'

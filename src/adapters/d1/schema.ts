@@ -238,6 +238,11 @@ export const bookings = sqliteTable(
     calendarSyncAttempts: integer('calendar_sync_attempts').notNull().default(0),
     calendarSyncError: text('calendar_sync_error'),
     calendarSyncedAt: integer('calendar_synced_at'),
+    calendarSyncUpdatedAt: integer('calendar_sync_updated_at'),
+    // connection id -> the calendar id each stored event was written to.
+    externalEventCalendarsJson: text('external_event_calendars_json').notNull().default('{}'),
+    // 'google' | 'ics': how the guest's confirmation reached them.
+    inviteChannel: text('invite_channel'),
     // The guest's language; null means the deployment default.
     guestLocale: text('guest_locale'),
   },

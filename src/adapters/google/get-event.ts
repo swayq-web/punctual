@@ -17,12 +17,23 @@ import { CalendarApiError, type CalendarProviderDeps, isRecord, providerFetch, r
 const API = 'https://www.googleapis.com/calendar/v3'
 
 export function createGoogleGetEvent(deps: CalendarProviderDeps) {
-  return async function getEvent(conn: CalendarConnection, externalId: string): Promise<ExternalEventSnapshot | null> {
-    if (conn.calendarIdWrite === null) {
+  /**
+   * `calendarId` is the calendar the event was WRITTEN to (stored per event
+   * since migration 0018). Falls back to the connection's current write
+   * calendar for an event written before that; the caller then treats a 404
+   * as "unknown", because the host may simply have repointed their calendar.
+   */
+  return async function getEvent(
+    conn: CalendarConnection,
+    externalId: string,
+    calendarId?: string,
+  ): Promise<ExternalEventSnapshot | null> {
+    const calendar = calendarId ?? conn.calendarIdWrite
+    if (calendar === null) {
       throw new CalendarApiError('google', `connection ${conn.id} has no write calendar configured`)
     }
     const url = new URL(
-      `${API}/calendars/${encodeURIComponent(conn.calendarIdWrite)}/events/${encodeURIComponent(externalId)}`,
+      `${API}/calendars/${encodeURIComponent(calendar)}/events/${encodeURIComponent(externalId)}`,
     )
     url.searchParams.set('fields', 'status,start,end')
     const res = await providerFetch(deps, conn, url.toString(), { method: 'GET' })

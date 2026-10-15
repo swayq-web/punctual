@@ -82,6 +82,7 @@ import { canManageTeam, isManagingRole } from '../core/domain/teams.js'
 import { hostUsers, hostsForReschedule, resolveHosts as resolveEventTypeHosts } from '../core/domain/hosts.js'
 import { changeBookingHosts } from '../core/domain/booking-hosts.js'
 import { saveCalendarConnection } from './calendar-connect.js'
+import { redriveAfterReconnect } from '../adapters/calendar-sync-redrive.js'
 import { insightsPage } from './pages/insights.js'
 import { CHANNEL_EVENTS, channelAad, parseChannelEvents, parseDestination, type ChannelConfig, type NotificationChannel } from '../core/domain/chat-notify.js'
 import { postChatMessage } from '../adapters/chat.js'
@@ -545,6 +546,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
         crypto: ports.crypto,
         clock: ports.clock,
         listCalendars: (conn) => ports.calendars.get(provider).listCalendars(conn),
+        onCalendarUsable: (userId) => redriveAfterReconnect(ports, userId),
       },
       auth.user.id,
       provider,

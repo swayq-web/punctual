@@ -888,15 +888,20 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
       )
     },
 
-    async setSyncResult(bookingId, ids, conferenceUrl) {
+    async setSyncResult(bookingId, ids, conferenceUrl, calendars) {
       // One statement rather than two: the ids and the link are produced by
       // the same provider call, and a partial write would leave a booking
       // whose calendar event exists but whose guest email cannot name the
-      // meeting link.
+      // meeting link. The calendars ride in the same statement for the same
+      // reason: an id without its calendar is an event the drift check
+      // cannot read back.
       await run(
-        'UPDATE bookings SET external_event_ids_json = ?, conference_url = ? WHERE id = ?',
+        `UPDATE bookings SET external_event_ids_json = ?, conference_url = ?,
+                external_event_calendars_json = COALESCE(?, external_event_calendars_json)
+          WHERE id = ?`,
         JSON.stringify(ids),
         conferenceUrl,
+        calendars === undefined ? null : JSON.stringify(calendars),
         bookingId,
       )
     },
@@ -933,25 +938,30 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
       // the reconciler recorded; only an update that rewrote the events may.
       await run(
         `UPDATE bookings
-            SET calendar_sync_status = 'synced', calendar_sync_error = NULL, calendar_synced_at = ?
+            SET calendar_sync_status = 'synced', calendar_sync_error = NULL,
+                calendar_synced_at = ?, calendar_sync_updated_at = ?
           WHERE id = ? AND (? = 1 OR calendar_sync_status != 'drifted')`,
+        at,
         at,
         bookingId,
         opts?.clearDrift ? 1 : 0,
       )
     },
 
-    async recordCalendarSyncRetry(bookingId, category) {
-      // `failed` is sticky against a stray retry: the dead-letter path or a
-      // permanent error already told the host, and flipping back to pending
-      // would hide that from the dashboard.
+    async recordCalendarSyncRetry(bookingId, category, at) {
+      // Only on a booking that is still pending (its first sync not landed)
+      // or failed (kept failed: the host was already told). A stale retry
+      // landing on a `synced` or `drifted` booking must change nothing:
+      // downgrading it to `pending` let the dead-letter path fail a healthy
+      // booking and alert about it (judge finding, SWA-1286).
       await run(
         `UPDATE bookings
             SET calendar_sync_attempts = calendar_sync_attempts + 1,
                 calendar_sync_error = ?,
-                calendar_sync_status = CASE WHEN calendar_sync_status = 'failed' THEN 'failed' ELSE 'pending' END
-          WHERE id = ?`,
+                calendar_sync_updated_at = ?
+          WHERE id = ? AND calendar_sync_status IN ('pending', 'failed')`,
         category,
+        at,
         bookingId,
       )
     },
@@ -964,14 +974,47 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
         `UPDATE bookings
             SET calendar_sync_status = 'failed',
                 calendar_sync_attempts = calendar_sync_attempts + 1,
-                calendar_sync_error = COALESCE(?, calendar_sync_error, 'retries_exhausted')
+                calendar_sync_error = COALESCE(?, calendar_sync_error, 'retries_exhausted'),
+                calendar_sync_updated_at = COALESCE(?, calendar_sync_updated_at)
           WHERE id = ? AND calendar_sync_status != 'failed'
             AND (? = 0 OR calendar_sync_status = 'pending')`,
         category,
+        opts?.at ?? null,
         bookingId,
         opts?.fromPendingOnly ? 1 : 0,
       ).run()
       return (res.meta.changes ?? 0) > 0
+    },
+
+    async reopenCalendarSync(bookingId, at) {
+      const res = await q(
+        `UPDATE bookings SET calendar_sync_status = 'pending', calendar_sync_updated_at = ?
+          WHERE id = ? AND calendar_sync_status = 'failed' AND status = 'confirmed'`,
+        at,
+        bookingId,
+      ).run()
+      return (res.meta.changes ?? 0) > 0
+    },
+
+    async listFailedNeedingReconnect(hostUserId, now, limit) {
+      // Same host match as `listForHost`: primary column OR co-host list.
+      const rows = await all<Record<string, unknown>>(
+        `SELECT * FROM bookings
+          WHERE (host_user_id = ? OR host_user_ids_json LIKE '%"' || ? || '"%')
+            AND status = 'confirmed' AND start_utc > ?
+            AND calendar_sync_status = 'failed' AND calendar_sync_error = 'needs_reconnect'
+          ORDER BY start_utc
+          LIMIT ?`,
+        hostUserId,
+        hostUserId,
+        now,
+        limit,
+      )
+      return rows.map((r) => mapBooking(r)!).filter(Boolean)
+    },
+
+    async setInviteChannel(bookingId, channel) {
+      await run('UPDATE bookings SET invite_channel = ? WHERE id = ?', channel, bookingId)
     },
 
     async markCalendarDrifted(bookingId) {
@@ -991,15 +1034,20 @@ export function createD1Repositories(db: D1Database, scope: RequestScope): Repos
       )
     },
 
-    async listStuckCalendarSyncs(now, createdBefore, limit) {
+    async listStuckCalendarSyncs(now, createdBefore, limit, retryActiveSince) {
+      // A booking still inside its own queue retry chain (it has failed at
+      // least once and its state moved recently) is left to that chain:
+      // re-enqueueing it only stacks a second chain on the first.
       const rows = await all<Record<string, unknown>>(
         `SELECT * FROM bookings
           WHERE calendar_sync_status = 'pending' AND status = 'confirmed' AND start_utc > ?
             AND external_event_ids_json = '{}' AND created_at < ?
+            AND NOT (calendar_sync_attempts > 0 AND COALESCE(calendar_sync_updated_at, 0) >= ?)
           ORDER BY start_utc
           LIMIT ?`,
         now,
         createdBefore,
+        retryActiveSince,
         limit,
       )
       return rows.map((r) => mapBooking(r)!).filter(Boolean)
@@ -1855,6 +1903,9 @@ function mapBooking(row: Record<string, unknown> | null): Booking | null {
     calendarSyncAttempts: Number(row['calendar_sync_attempts'] ?? 0),
     calendarSyncError: row['calendar_sync_error'] == null ? null : (String(row['calendar_sync_error']) as NonNullable<Booking['calendarSyncError']>),
     calendarSyncedAt: row['calendar_synced_at'] == null ? null : Number(row['calendar_synced_at']),
+    calendarSyncUpdatedAt: row['calendar_sync_updated_at'] == null ? null : Number(row['calendar_sync_updated_at']),
+    externalEventCalendars: JSON.parse(String(row['external_event_calendars_json'] ?? '{}')),
+    inviteChannel: row['invite_channel'] == null ? null : (String(row['invite_channel']) as NonNullable<Booking['inviteChannel']>),
     guestLocale: row['guest_locale'] == null ? null : String(row['guest_locale']),
   }
 }
