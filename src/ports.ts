@@ -613,18 +613,19 @@ export interface GuestDataRepository {
   pruneExpiredMagicLinks(now: number, limit: number): Promise<number>
   /** Confirmed bookings for this guest email that have not ended yet. */
   listUpcomingConfirmedForGuest(email: string, now: number): Promise<Booking[]>
-  /** Anonymise every booking and delete every idempotency/login record for this email. */
-  eraseByEmail(email: string): Promise<{ bookings: number; idempotency: number; magicLinks: number }>
-  /** The audit line: counts only. */
-  recordErasure(entry: {
-    id: string
-    at: number
-    actorUserId: string
-    bookingsAnonymised: number
-    bookingsCancelled: number
-    idempotencyDeleted: number
-    magicLinksDeleted: number
-  }): Promise<void>
+  /**
+   * Erase one guest in ONE atomic D1 batch: anonymise their bookings (except
+   * upcoming confirmed ones, which only the cancel path handles), delete their
+   * idempotency records and, unless the address belongs to a host user, their
+   * login tokens, and write the count-only audit line. Any statement failing
+   * rolls the whole batch back, so there is never a tombstoned row without its
+   * audit line.
+   */
+  eraseByEmail(
+    email: string,
+    audit: { id: string; at: number; actorUserId: string; bookingsCancelled: number },
+    now: number,
+  ): Promise<{ bookings: number; idempotency: number; magicLinks: number }>
 }
 
 export interface IdempotencyRepository {

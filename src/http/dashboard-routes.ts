@@ -100,7 +100,8 @@ import { MAX_DECODED_PIXELS,
 import { resizeToFitThumbnail, resizeToSquareThumbnail } from '../adapters/image/resize.js'
 import { errorPage, shellFoot, shellHead } from './pages/booking.js'
 import { manageHeaders, manageResultPage } from './pages/manage.js'
-import { eraseGuestByEmail } from '../adapters/guest-data.js'
+import { EraseError, eraseGuestByEmail } from '../adapters/guest-data.js'
+import { isValidEmail } from '../core/domain/booking-service.js'
 import { langCookieHeader, resolveLocale, t, type Locale, type MessageKey } from '../core/i18n/index.js'
 import {
   CSRF_FIELD,
@@ -2578,7 +2579,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
       const form = await c.req.formData()
       if (!(await csrfOk(c, form))) return csrfRejected(c)
       const email = String(form.get('email') ?? '').trim()
-      if (!email.includes('@') || email.length > 320) {
+      if (email.length > 320 || !isValidEmail(email)) {
         return renderAdmin(c, { errors: { 'erase-guest': 'Enter the guest’s full email address.' } }, 400)
       }
       if (String(form.get('confirm') ?? '') !== 'yes') {
@@ -2602,12 +2603,27 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
           },
           email,
         )
-      } catch {
-        // Nothing is anonymised when a cancel throws; the admin can repeat it.
-        console.error(JSON.stringify({ source: 'punctual.guest_data', event: 'erase_failed' }))
-        return renderAdmin(c, { errors: { 'erase-guest': 'Could not cancel an upcoming meeting, so nothing was erased. Try again.' } }, 500)
+      } catch (err) {
+        console.error(JSON.stringify({ source: 'punctual.guest_data', event: 'erase_failed', stage: err instanceof EraseError ? err.stage : 'unknown' }))
+        const message =
+          err instanceof EraseError && err.stage === 'cancel'
+            ? 'Could not cancel an upcoming meeting, so nothing was erased. Try again.'
+            : 'The erase failed and was rolled back, so nothing was erased and nothing was logged. Try again.'
+        return renderAdmin(c, { errors: { 'erase-guest': message } }, 500)
       }
       await advanceBookmark(c)
+      if (result.stillUpcoming > 0) {
+        const n = result.stillUpcoming
+        return renderAdmin(
+          c,
+          {
+            errors: {
+              'erase-guest': `${n} upcoming meeting${n === 1 ? ' is' : 's are'} still confirmed (it could not be cancelled), so ${n === 1 ? 'it was' : 'they were'} left untouched. Everything else was erased. Repeat the action.`,
+            },
+          },
+          409,
+        )
+      }
       const { bookingsAnonymised: n, bookingsCancelled: k } = result
       return renderAdmin(c, {
         notice: `Erased ${n} booking${n === 1 ? '' : 's'}${k > 0 ? `, ${k} upcoming meeting${k === 1 ? '' : 's'} cancelled first` : ''}. Past events in Google Calendar are not touched.`,

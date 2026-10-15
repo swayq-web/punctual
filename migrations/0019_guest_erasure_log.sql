@@ -14,3 +14,11 @@ CREATE TABLE IF NOT EXISTS guest_erasure_log (
   idempotency_deleted  INTEGER NOT NULL,
   magic_links_deleted  INTEGER NOT NULL
 );
+
+-- The retention sweep ("ended before the cutoff, not yet anonymised") reads
+-- only rows that still hold a guest: a partial index on end_utc excluding the
+-- tombstone, so anonymised rows leave it and the sweep stops re-scanning them.
+-- The query spells the tombstone address as a literal, which is what lets
+-- SQLite prove it matches this index.
+CREATE INDEX IF NOT EXISTS bookings_retention_idx ON bookings (end_utc)
+  WHERE guest_email <> 'erased@erased.invalid';

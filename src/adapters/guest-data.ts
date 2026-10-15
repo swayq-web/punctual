@@ -55,19 +55,34 @@ export interface EraseResult {
   bookingsCancelled: number
   idempotencyDeleted: number
   magicLinksDeleted: number
+  /**
+   * Upcoming confirmed bookings for this guest that are STILL confirmed after
+   * the cancel passes (a cancel lost a race, or one was made meanwhile). They
+   * are not anonymised; the admin should repeat the action.
+   */
+  stillUpcoming: number
+}
+
+/** Which half failed. Either way nothing was erased by the failing step. */
+export class EraseError extends Error {
+  constructor(readonly stage: 'cancel' | 'erase') {
+    super(stage === 'cancel' ? 'cancelling an upcoming meeting failed' : 'the erase batch failed and was rolled back')
+  }
 }
 
 /**
  * Erase one guest, across every host, now.
  *
- * Order matters. Future confirmed bookings are cancelled FIRST through the
- * caller's normal cancel path (`cancel`), so the guest is told, the slot is
- * released and the Google event is deleted by the calendar sync; only then is
- * the personal data removed. If a cancel throws, nothing is anonymised and the
- * error propagates: the action can be repeated, and a half-erased guest with a
- * live calendar event is the one outcome this must not produce.
+ * Order matters. Upcoming confirmed bookings are cancelled FIRST through the
+ * caller's normal cancel path (`cancel`): the slot is released, the guest is
+ * told and the calendar sync deletes the Google event. Two passes, so a
+ * booking made while the first was running is caught too. Then ONE atomic
+ * batch anonymises and deletes and writes the audit line; it never touches an
+ * upcoming confirmed booking, so a cancel that lost a race leaves that
+ * booking whole and visible in `stillUpcoming` instead of orphaning its
+ * Google event with the guest erased.
  *
- * Past events already written to a host's Google Calendar are outside this app
+ * Past events already in a host's Google Calendar are outside this app
  * (docs/data-retention.md).
  */
 export async function eraseGuestByEmail(
@@ -82,17 +97,33 @@ export async function eraseGuestByEmail(
 ): Promise<EraseResult> {
   const email = normaliseGuestEmail(rawEmail)
   let cancelled = 0
-  for (const booking of await deps.repos.guestData.listUpcomingConfirmedForGuest(email, deps.now)) {
-    if (await deps.cancel(booking)) cancelled += 1
+  try {
+    for (let pass = 0; pass < 2; pass++) {
+      for (const booking of await deps.repos.guestData.listUpcomingConfirmedForGuest(email, deps.now)) {
+        if (await deps.cancel(booking)) cancelled += 1
+      }
+    }
+  } catch {
+    throw new EraseError('cancel')
   }
-  const erased = await deps.repos.guestData.eraseByEmail(email)
+  let erased
+  try {
+    erased = await deps.repos.guestData.eraseByEmail(
+      email,
+      { id: deps.newId(), at: deps.now, actorUserId: deps.actorUserId, bookingsCancelled: cancelled },
+      deps.now,
+    )
+  } catch {
+    throw new EraseError('erase')
+  }
+  const stillUpcoming = (await deps.repos.guestData.listUpcomingConfirmedForGuest(email, deps.now)).length
   const result: EraseResult = {
     bookingsAnonymised: erased.bookings,
     bookingsCancelled: cancelled,
     idempotencyDeleted: erased.idempotency,
     magicLinksDeleted: erased.magicLinks,
+    stillUpcoming,
   }
-  await deps.repos.guestData.recordErasure({ id: deps.newId(), at: deps.now, actorUserId: deps.actorUserId, ...result })
   log('guest_erased', { ...result })
   return result
 }

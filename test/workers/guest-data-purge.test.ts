@@ -18,7 +18,7 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { buildDashboardRoutes } from '../../src/http/dashboard-routes.js'
 import { createD1Repositories } from '../../src/adapters/d1/repositories.js'
 import { createWebCrypto } from '../../src/adapters/crypto/webcrypto.js'
-import { purgeExpiredGuestData } from '../../src/adapters/guest-data.js'
+import { eraseGuestByEmail, purgeExpiredGuestData } from '../../src/adapters/guest-data.js'
 import { runScheduledTasks } from '../../src/adapters/scheduled.js'
 import {
   GUEST_DATA_RETENTION_MONTHS,
@@ -28,6 +28,7 @@ import {
 } from '../../src/core/domain/guest-data.js'
 import { SESSION_ABSOLUTE_TTL_MS, SESSION_COOKIE_NAME, SESSION_TTL_MS } from '../../src/core/domain/auth-service.js'
 import { createFakeBlobStorage, createFakeEmailSender, createFakeRateLimiter, fakeConfig } from '../../src/testing/fakes.js'
+import type { Booking } from '../../src/core/domain/types.js'
 import type { SlotService } from '../../src/engine.js'
 import type {
   BlobCache,
@@ -347,7 +348,13 @@ describe('erase by email', () => {
     await seedBooking({ id: 'bk_other', start: REAL_NOW - 3 * DAY, email: 'other@example.test', name: 'Other Person' })
     const idem = 'INSERT INTO idempotency_keys (key,scope,request_hash,response_json,status,expires_at) VALUES (?,?,?,?,?,?)'
     await db.prepare(idem).bind('k_scope', `booking:${ET_A}:${GUEST}`, 'h', '{}', 201, REAL_NOW + DAY).run()
-    await db.prepare(idem).bind('k_body', 'rest:key', 'h', JSON.stringify({ booking: { guestEmail: 'Grace@Example.Test' } }), 201, REAL_NOW + DAY).run()
+    await db.prepare(idem).bind('k_rest', 'rest:key', 'h', JSON.stringify({ id: 'bk_e1' }), 201, REAL_NOW + DAY).run()
+    // Near-misses: none of these is the guest, so all survive.
+    for (const near of ['xgrace@example.test', 'grace@example.test.evil', 'grace+1@example.test']) {
+      await db.prepare(idem).bind(`k_near_${near}`, `booking:${ET_A}:${near}`, 'h', '{}', 201, REAL_NOW + DAY).run()
+      await seedBooking({ id: `bk_near_${near}`, start: REAL_NOW - 3 * DAY, email: near, name: 'Near Miss' })
+      await db.prepare('INSERT INTO magic_link_tokens (token_hash,email,expires_at,created_at) VALUES (?,?,?,?)').bind(`t_near_${near}`, near, REAL_NOW + DAY, REAL_NOW).run()
+    }
     await db.prepare(idem).bind('k_other', `booking:${ET_A}:other@example.test`, 'h', '{}', 201, REAL_NOW + DAY).run()
     const magic = 'INSERT INTO magic_link_tokens (token_hash,email,expires_at,created_at) VALUES (?,?,?,?)'
     await db.prepare(magic).bind('t_guest', GUEST, REAL_NOW + DAY, REAL_NOW).run()
@@ -364,10 +371,21 @@ describe('erase by email', () => {
 
     for (const id of ['bk_e1', 'bk_e2', 'bk_e3']) expect(await isTombstoned(id)).toBe(true)
     expect((await row('bk_other')).guest_email).toBe('other@example.test')
-    const keys = (await db.prepare('SELECT key FROM idempotency_keys').all<{ key: string }>()).results.map((r) => r.key)
-    expect(keys).toEqual(['k_other'])
-    const tokens = (await db.prepare('SELECT token_hash FROM magic_link_tokens').all<{ token_hash: string }>()).results.map((r) => r.token_hash)
-    expect(tokens).toEqual(['t_other'])
+    const keys = (await db.prepare('SELECT key FROM idempotency_keys ORDER BY key').all<{ key: string }>()).results.map((r) => r.key)
+    expect(keys).toEqual(['k_near_grace+1@example.test', 'k_near_grace@example.test.evil', 'k_near_xgrace@example.test', 'k_other', 'k_rest'])
+    const tokens = (await db.prepare('SELECT token_hash FROM magic_link_tokens ORDER BY token_hash').all<{ token_hash: string }>()).results.map((r) => r.token_hash)
+    expect(tokens).toEqual(['t_near_grace+1@example.test', 't_near_grace@example.test.evil', 't_near_xgrace@example.test', 't_other'])
+  })
+
+  it('matches the address exactly: superstring, suffix and plus-address neighbours survive', async () => {
+    await seedGuestEverywhere()
+    const cookie = await seedSession(ADMIN_ID)
+    await postErase({ csrf: await csrfFrom(cookie), email: GUEST, confirm: 'yes' }, cookie)
+    for (const near of ['xgrace@example.test', 'grace@example.test.evil', 'grace+1@example.test']) {
+      const r = await row(`bk_near_${near}`)
+      expect(r.guest_email).toBe(near)
+      expect(r.guest_name).toBe('Near Miss')
+    }
   })
 
   it('writes a count-only audit line that cannot identify the guest', async () => {
@@ -381,7 +399,7 @@ describe('erase by email', () => {
     expect(entry['actor_user_id']).toBe(ADMIN_ID)
     expect(entry['bookings_anonymised']).toBe(3)
     expect(entry['bookings_cancelled']).toBe(0)
-    expect(entry['idempotency_deleted']).toBe(2)
+    expect(entry['idempotency_deleted']).toBe(1)
     expect(entry['magic_links_deleted']).toBe(1)
     expect(Number(entry['at'])).toBeGreaterThan(0)
     const dump = JSON.stringify(entry).toLowerCase()
@@ -438,7 +456,7 @@ describe('erase by email', () => {
     expect(await res.text()).toBe('Forbidden')
     expect(await isTombstoned('bk_e1')).toBe(false)
     expect(await count('guest_erasure_log')).toBe(0)
-    expect(await count('idempotency_keys')).toBe(3)
+    expect(await count('idempotency_keys')).toBe(6)
   })
 
   it('refuses an anonymous request', async () => {
@@ -465,8 +483,11 @@ describe('erase by email', () => {
     const cookie = await seedSession(ADMIN_ID)
     const csrf = await csrfFrom(cookie)
     expect((await postErase({ csrf, email: GUEST }, cookie)).status).toBe(400)
-    expect((await postErase({ csrf, email: 'not-an-email', confirm: 'yes' }, cookie)).status).toBe(400)
+    for (const bad of ['not-an-email', '@', 'a@', '@b.test', 'a b@c.test']) {
+      expect((await postErase({ csrf, email: bad, confirm: 'yes' }, cookie)).status).toBe(400)
+    }
     expect(await isTombstoned('bk_e1')).toBe(false)
+    expect(await count('guest_erasure_log')).toBe(0)
   })
 
   it('cannot be aimed at the tombstone address', async () => {
@@ -481,5 +502,105 @@ describe('erase by email', () => {
     const cookie = await seedSession(ADMIN_ID)
     const html = await (await app.fetch(new Request(`${BASE}/dashboard/admin`, { headers: { cookie } }))).text()
     expect(html).toContain('action="/dashboard/admin/erase-guest"')
+  })
+})
+
+describe('erase by email: atomicity, races, scope', () => {
+  const GUEST = 'grace@example.test'
+  const repos = () => createD1Repositories(db, { consistency: 'bookmark' })
+  let auditSeq = 0
+  const erase = (cancel: (b: Booking) => Promise<boolean>) =>
+    eraseGuestByEmail({ repos: repos(), now: REAL_NOW, actorUserId: ADMIN_ID, newId: () => `ger_t${++auditSeq}`, cancel }, GUEST)
+
+  it('is atomic: a failing audit insert rolls back every tombstone and delete', async () => {
+    await seedBooking({ id: 'bk_at1', start: REAL_NOW - 3 * DAY })
+    await seedBooking({ id: 'bk_at2', start: REAL_NOW - 5 * DAY, host: HOST_B, eventType: ET_B })
+    await db.prepare('INSERT INTO idempotency_keys (key,scope,request_hash,response_json,status,expires_at) VALUES (?,?,?,?,?,?)')
+      .bind('k_at', `booking:${ET_A}:${GUEST}`, 'h', '{}', 201, REAL_NOW + DAY).run()
+    await db.prepare('INSERT INTO magic_link_tokens (token_hash,email,expires_at,created_at) VALUES (?,?,?,?)').bind('t_at', GUEST, REAL_NOW + DAY, REAL_NOW).run()
+    await db.prepare(`CREATE TRIGGER fail_audit BEFORE INSERT ON guest_erasure_log BEGIN SELECT RAISE(ABORT, 'boom'); END`).run()
+    try {
+      await expect(erase(async () => true)).rejects.toMatchObject({ stage: 'erase' })
+    } finally {
+      await db.prepare('DROP TRIGGER fail_audit').run()
+    }
+    expect(await isTombstoned('bk_at1')).toBe(false)
+    expect(await isTombstoned('bk_at2')).toBe(false)
+    expect(await count('idempotency_keys')).toBe(1)
+    expect(await count('magic_link_tokens')).toBe(1)
+    expect(await count('guest_erasure_log')).toBe(0)
+    // And a repeat then works and is fully counted: no "0 forever".
+    const ok = await erase(async () => true)
+    expect(ok).toMatchObject({ bookingsAnonymised: 2, idempotencyDeleted: 1, magicLinksDeleted: 1, stillUpcoming: 0 })
+  })
+
+  it('says which half failed: a throwing cancel is stage "cancel" and erases nothing', async () => {
+    await seedBooking({ id: 'bk_cf', start: REAL_NOW + 2 * DAY })
+    await seedBooking({ id: 'bk_cf_past', start: REAL_NOW - 2 * DAY })
+    await expect(erase(async () => { throw new Error('mail down') })).rejects.toMatchObject({ stage: 'cancel' })
+    expect(await isTombstoned('bk_cf')).toBe(false)
+    expect(await isTombstoned('bk_cf_past')).toBe(false)
+    expect(await count('guest_erasure_log')).toBe(0)
+  })
+
+  it('never anonymises an upcoming confirmed booking whose cancel lost a race; reports it and retries clean', async () => {
+    await seedBooking({ id: 'bk_race', start: REAL_NOW + 2 * DAY, externalEventIds: { c: 'evt' } })
+    await seedBooking({ id: 'bk_race_past', start: REAL_NOW - 2 * DAY })
+    const result = await erase(async () => false) // cancel "lost": booking stays confirmed
+    expect(result.stillUpcoming).toBe(1)
+    const kept = await row('bk_race')
+    expect(kept.status).toBe('confirmed')
+    expect(kept.guest_email).toBe(GUEST)
+    expect(await isTombstoned('bk_race_past')).toBe(true)
+    // The route turns that into a 409 telling the admin to repeat.
+    const done = await erase(async (b) => {
+      await db.prepare("UPDATE bookings SET status='cancelled' WHERE id = ?").bind(b.id).run()
+      return true
+    })
+    expect(done.stillUpcoming).toBe(0)
+    expect(await isTombstoned('bk_race')).toBe(true)
+  })
+
+  it('catches a booking made while the first cancel pass was running', async () => {
+    await seedBooking({ id: 'bk_first', start: REAL_NOW + 2 * DAY })
+    const seen: string[] = []
+    const result = await erase(async (b) => {
+      seen.push(b.id)
+      if (b.id === 'bk_first') await seedBooking({ id: 'bk_newcomer', start: REAL_NOW + 4 * DAY })
+      await db.prepare("UPDATE bookings SET status='cancelled' WHERE id = ?").bind(b.id).run()
+      return true
+    })
+    expect(seen).toEqual(['bk_first', 'bk_newcomer'])
+    expect(result.stillUpcoming).toBe(0)
+    expect(await isTombstoned('bk_newcomer')).toBe(true)
+  })
+
+  it('listUpcomingConfirmedForGuest returns only confirmed, not-yet-ended bookings of that address', async () => {
+    await seedBooking({ id: 'bk_l_ok', start: REAL_NOW + DAY })
+    await seedBooking({ id: 'bk_l_cx', start: REAL_NOW + DAY, status: 'cancelled' })
+    await seedBooking({ id: 'bk_l_rs', start: REAL_NOW + DAY, status: 'rescheduled' })
+    await seedBooking({ id: 'bk_l_past', start: REAL_NOW - DAY })
+    await seedBooking({ id: 'bk_l_other', start: REAL_NOW + DAY, email: 'other@example.test' })
+    const ids = (await repos().guestData.listUpcomingConfirmedForGuest('  Grace@Example.Test', REAL_NOW)).map((b) => b.id)
+    expect(ids).toEqual(['bk_l_ok'])
+  })
+
+  it('leaves a host user’s own login tokens alone but deletes a non-user guest address’s', async () => {
+    await seedBooking({ id: 'bk_h', start: REAL_NOW - DAY, email: 'host-a-gd@example.test' })
+    const magic = 'INSERT INTO magic_link_tokens (token_hash,email,expires_at,created_at) VALUES (?,?,?,?)'
+    await db.prepare(magic).bind('t_host', 'host-a-gd@example.test', REAL_NOW + DAY, REAL_NOW).run()
+    await db.prepare(magic).bind('t_guest', GUEST, REAL_NOW + DAY, REAL_NOW).run()
+    await eraseGuestByEmail({ repos: repos(), now: REAL_NOW, actorUserId: ADMIN_ID, newId: () => 'ger_h1', cancel: async () => true }, 'host-a-gd@example.test')
+    await erase(async () => true)
+    const tokens = (await db.prepare('SELECT token_hash FROM magic_link_tokens').all<{ token_hash: string }>()).results.map((r) => r.token_hash)
+    expect(tokens).toEqual(['t_host'])
+  })
+
+  it('the retention sweep uses the partial index, so tombstones are not rescanned', async () => {
+    const plan = await db
+      .prepare(`EXPLAIN QUERY PLAN SELECT id FROM bookings WHERE end_utc < ? AND guest_email <> '${TOMBSTONE.guestEmail}' ORDER BY end_utc LIMIT ?`)
+      .bind(1, 1)
+      .all<{ detail: string }>()
+    expect(plan.results.map((r) => r.detail).join(' ')).toContain('bookings_retention_idx')
   })
 })

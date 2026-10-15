@@ -16,8 +16,8 @@ admin can erase a guest immediately.
 | Where | What | Retention | Removed by |
 |---|---|---|---|
 | D1 `bookings` | `guest_name`, `guest_email`, `answers_json`, `guest_timezone`, `guest_locale` | 12 months after `end_utc` | Anonymised in place by the cron; by email on request |
-| D1 `idempotency_keys` | `scope` (`booking:<eventTypeId>:<email>`), `response_json` (the booking response), `request_hash` (a hash of the email) | Own TTL, 24 hours | Deleted by the cron once expired; by email on request |
-| D1 `magic_link_tokens` | `email` typed at the sign-in page (may be a non-staff address) | Own TTL, minutes | Deleted by the cron once expired; by email on request |
+| D1 `idempotency_keys` | `scope` (`booking:<eventTypeId>:<email>`), `response_json` (the booking id only), `request_hash` (a hash of the email) | Own TTL, 24 hours | Deleted by the cron once expired; by email on request |
+| D1 `magic_link_tokens` | `email` typed at the sign-in page (may be a non-staff address) | Own TTL, minutes | Deleted by the cron once expired; by email on request, except when the address belongs to a user of this instance (a host's own sign-in tokens are theirs, not a guest's) |
 | D1 `guest_erasure_log` | Counts only: who erased, when, how many rows | Kept | Never holds an email, not even hashed |
 | Queue `TASKS` / DLQ | Email and sync messages (guest address inside) | Until processed | Message deletion on ack. A DLQ message is not swept: drain the DLQ per the runbook |
 | Webhook and Slack/Telegram deliveries | The booking payload, sent out | Not stored here | Outside this app: the receiving side |
@@ -59,16 +59,22 @@ Instance admins only (a member gets 403), CSRF-protected, needs the confirm
 box. For the given email, across all hosts:
 
 1. Every **upcoming confirmed** booking is cancelled first through the normal
-   cancel path: the slot is released, the guest and the host are emailed, and
-   the calendar sync deletes the Google event. If a cancel fails, nothing is
-   anonymised and the admin repeats the action.
-2. Every booking for that email (any status, any host) is anonymised.
-3. Idempotency records for that email (by scope and by stored response) and
-   login tokens for that email are deleted.
-4. One audit line is written to `guest_erasure_log`: actor, time, counts.
-   The email is deliberately not recorded.
+   cancel path (two passes, so a booking made meanwhile is caught): the slot
+   is released, the guest and the host are emailed, and the calendar sync
+   deletes the Google event. If a cancel throws, nothing is erased and the
+   page says so ("Could not cancel an upcoming meeting").
+2. Then ONE atomic database batch anonymises every other booking for that
+   email (any status, any host), deletes the idempotency records for that
+   email, deletes its login tokens (unless it is a user's address), and writes
+   the audit line. If the batch fails it rolls back completely: nothing is
+   erased, no audit line exists, and the page says "rolled back". The batch
+   never touches an upcoming confirmed booking, so a cancel that lost a race
+   leaves that booking whole; the page then answers 409 with how many remain,
+   and repeating the action finishes the job.
+3. The audit line in `guest_erasure_log` holds actor, time and counts. The
+   email is deliberately not recorded.
 
-The email match is case-insensitive.
+The email must be a valid address (the same check as the booking form). The email match is case-insensitive.
 
 ## Outside this app (operator steps)
 
