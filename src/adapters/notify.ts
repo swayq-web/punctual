@@ -13,6 +13,8 @@
 
 import type { Booking, EventType, User, WebhookEvent } from '../core/domain/types.js'
 import type { EnginePorts } from '../ports.js'
+import { findOtherUpcomingGuestBooking } from '../core/domain/guest-history.js'
+import type { Locale } from '../core/i18n/index.js'
 import { calendarDescription, calendarTitle, participantsFor } from '../core/domain/calendar-text.js'
 import { hostSettings } from '../core/domain/hosts.js'
 import type { NotificationChannel } from '../core/domain/chat-notify.js'
@@ -29,6 +31,16 @@ import {
   icsSequenceForBooking,
   icsUidForBooking,
 } from '../core/ics.js'
+
+/** The guest's stored language (`bookings.guest_locale`), for the GUEST mail only. */
+function guestLocaleOf(b: Booking): { locale?: Locale } {
+  return b.guestLocale === 'da' || b.guestLocale === 'en' ? { locale: b.guestLocale } : {}
+}
+
+/** Replies to guest mail reach the host, not the no-reply sender. */
+function guestReplyTo(host: User): { replyTo?: string } {
+  return host.email ? { replyTo: host.email } : {}
+}
 
 /** A booking known to have no predecessor gets an empty chain, not `undefined`. */
 const NO_CHAIN: ReadonlyMap<string, Booking> = new Map()
@@ -101,6 +113,19 @@ export async function notifyBookingCreated(ctx: NotifyContext): Promise<void> {
     console.warn('[punctual] .ics too large to attach; sending confirmation without it')
   }
 
+  // "This guest already has a booking with you on <date>" for the host mail.
+  const priorBookingStartUtc = await (async () => {
+    try {
+      const now = ports.clock.now()
+      const upcoming = await ports
+        .repositories({ consistency: 'unconstrained' })
+        .bookings.listForHost(host.id, { start: now, end: now + 366 * 86_400_000 })
+      return findOtherUpcomingGuestBooking(upcoming, booking, now)
+    } catch {
+      return null // a note, never a reason to lose the notification
+    }
+  })()
+
   const shared = {
     booking,
     eventType,
@@ -111,6 +136,8 @@ export async function notifyBookingCreated(ctx: NotifyContext): Promise<void> {
     baseUrl: ports.config.baseUrl,
     ...(manageUrl ? { rescheduleUrl: manageUrl, cancelUrl: manageUrl } : {}),
     hasAttachment: Boolean(attachments),
+    ...guestLocaleOf(booking),
+    ...(priorBookingStartUtc !== null ? { priorBookingStartUtc } : {}),
   }
 
   const guest = bookingConfirmationForGuest(shared)
@@ -130,6 +157,7 @@ export async function notifyBookingCreated(ctx: NotifyContext): Promise<void> {
           html: guest.html,
           text: guest.text,
           ...(attachments ? { attachments } : {}),
+          ...guestReplyTo(host),
         },
       })
       .catch((err) => console.error('[punctual] guest confirmation failed to queue', err)),
@@ -362,6 +390,7 @@ export async function notifyBookingCancelled(ctx: {
     ...(ctx.reason ? { reason: ctx.reason } : {}),
     brandName: ports.config.brandName,
     supportEmail: ports.config.supportEmail,
+    ...guestLocaleOf(booking),
   }
 
   const guest = bookingCancelled({ ...shared, audience: 'guest' })
@@ -385,6 +414,7 @@ export async function notifyBookingCancelled(ctx: {
           html: guest.html,
           text: guest.text,
           ...(attachments ? { attachments } : {}),
+          ...guestReplyTo(host),
         },
       })
       .catch((err) => console.error('[punctual] guest cancellation failed to queue', err)),
@@ -448,6 +478,7 @@ export async function notifyBookingRescheduled(ctx: {
     supportEmail: ports.config.supportEmail,
     ...(manageUrl ? { rescheduleUrl: manageUrl, cancelUrl: manageUrl } : {}),
     hasAttachment: Boolean(attachments),
+    ...guestLocaleOf(booking),
   }
 
   const guest = bookingRescheduled({ ...shared, audience: 'guest' })
@@ -464,6 +495,7 @@ export async function notifyBookingRescheduled(ctx: {
           html: guest.html,
           text: guest.text,
           ...(attachments ? { attachments } : {}),
+          ...guestReplyTo(host),
         },
       })
       .catch((err) => console.error('[punctual] guest reschedule mail failed to queue', err)),

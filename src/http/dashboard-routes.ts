@@ -75,7 +75,7 @@ import {
 } from '../core/domain/auth-flows.js'
 import { OAUTH_ENDPOINTS, needsSetup, scopesFor, type OAuthPurpose } from '../adapters/oauth.js'
 import { dayRange } from '../engine.js'
-import { BOOKING_DRIFTED_MESSAGE, isDrifted } from '../core/domain/calendar-sync.js'
+import { isDrifted } from '../core/domain/calendar-sync.js'
 import { formatInZone, isValidTimeZone, localDateString } from '../core/time/zone.js'
 import { validateSlug } from '../core/domain/slugs.js'
 import { canManageTeam, isManagingRole } from '../core/domain/teams.js'
@@ -99,6 +99,8 @@ import { MAX_DECODED_PIXELS,
   thumbKeyFor, fitKeyFor, originalKeyCandidates, isLogoShape, COMPANY_LOGO_KEY, COMPANY_LOGO_SHAPE, companyLogoFrom } from '../core/domain/media.js'
 import { resizeToFitThumbnail, resizeToSquareThumbnail } from '../adapters/image/resize.js'
 import { errorPage, shellFoot, shellHead } from './pages/booking.js'
+import { manageHeaders, manageResultPage } from './pages/manage.js'
+import { langCookieHeader, resolveLocale, t, type Locale, type MessageKey } from '../core/i18n/index.js'
 import {
   CSRF_FIELD,
   MAX_RANGES_PER_DAY,
@@ -3091,7 +3093,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     return true
   }
 
-  /** SWA-1285. Plain English; the i18n integrator swaps this for a `calendarUnavailable` key. */
+  /** Host dashboard copy: English by design (the dashboard is not localized). */
   const CALENDAR_UNAVAILABLE_MOVE =
     "We can't check this host's calendar right now, so the booking was not moved. Please try again later or contact the host."
 
@@ -3133,6 +3135,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
       guestName: old.guestName,
       guestEmail: old.guestEmail,
       guestTimezone: old.guestTimezone,
+      ...(old.guestLocale ? { guestLocale: old.guestLocale } : {}),
       answers: old.answers,
       rescheduleOf: old.id,
     })
@@ -3216,10 +3219,11 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     if (!verified.ok) return manageError(c, verified.message)
 
     const { booking, purpose } = verified
+    const lang = guestLang(c, booking)
     const repos = ports.repositories(guestScope())
     const eventType = await repos.eventTypes.byId(booking.eventTypeId)
     const host = await repos.users.byId(booking.hostUserId)
-    if (!host) return manageError(c, 'This booking is no longer available.')
+    if (!host) return manageError(c, 'manage.err.unavailable', lang)
 
     const startRaw = Number(c.req.query('start'))
     // Same guard as the public booking page: `Number.isFinite` alone lets a
@@ -3259,7 +3263,8 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
       offered = daySlots.filter((s) => localDateString(s.start, booking.guestTimezone) === selectedDate)
     }
 
-    return c.html(
+    return guestHtml(
+      c,
       bookingDetailPage({
         brandName,
         booking,
@@ -3269,47 +3274,61 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
         // Pass the RAW purpose. Collapsing 'manage' to 'reschedule' here is
         // what hid the cancel form from every real guest.
         purpose,
+        locale: lang.locale,
         ...(offered ? { slots: offered } : {}),
         ...(selectedDate ? { selectedDate } : {}),
         ...(Number.isFinite(startParam) ? { newStart: startParam } : {}),
       }),
+      200,
+      lang,
     )
   })
 
   app.post('/booking/:id/cancel', async (c) => {
     const form = await c.req.formData()
     const token = String(form.get('token') ?? '')
-    if (!(await manageRateLimitOk(c))) return manageError(c, 'Too many attempts. Try again shortly.')
+    const formLang = String(form.get('lang') ?? '')
+    if (!(await manageRateLimitOk(c))) return manageError(c, 'manage.err.tooMany', guestLang(c, undefined, formLang))
 
     const verified = await verifyManageLink(token, c.req.param('id') ?? '', 'cancel')
-    if (!verified.ok) return manageError(c, verified.message)
+    if (!verified.ok) return manageError(c, verified.message, guestLang(c, undefined, formLang))
+    const lang = guestLang(c, verified.booking, formLang)
 
     const repos = ports.repositories(guestScope())
 
     // A booking that is already cancelled or superseded must not be acted on
     // again: without this, one link stays replayable forever.
     if (verified.booking.status !== 'confirmed') {
-      return manageError(c, 'This booking is no longer active.')
+      return manageError(c, 'manage.err.inactive', lang)
     }
-    if (isDrifted(verified.booking)) return manageError(c, BOOKING_DRIFTED_MESSAGE)
+    if (isDrifted(verified.booking)) return manageError(c, 'bookingDrifted.body', lang)
 
     const cancelled = await cancelBooking(repos, verified.booking, { cancelledBy: 'guest' })
-    if (!cancelled) return manageError(c, 'This booking is no longer active.')
+    if (!cancelled) return manageError(c, 'manage.err.inactive', lang)
 
-    return c.html(
-      shellHead({ title: `Cancelled · ${brandName}`, brandName }) +
-        errorPage('Booking cancelled', 'The time has been released and the host has been notified.') +
-        shellFoot(),
+    return guestHtml(
+      c,
+      manageResultPage(
+        brandName,
+        lang.locale,
+        'manage.cancelled.pageTitle',
+        t(lang.locale, 'manage.cancelled.title'),
+        t(lang.locale, 'manage.cancelled.body'),
+      ),
+      200,
+      lang,
     )
   })
 
   app.post('/booking/:id/reschedule', async (c) => {
     const form = await c.req.formData()
     const token = String(form.get('token') ?? '')
-    if (!(await manageRateLimitOk(c))) return manageError(c, 'Too many attempts. Try again shortly.')
+    const formLang = String(form.get('lang') ?? '')
+    if (!(await manageRateLimitOk(c))) return manageError(c, 'manage.err.tooMany', guestLang(c, undefined, formLang))
 
     const verified = await verifyManageLink(token, c.req.param('id') ?? '', 'reschedule')
-    if (!verified.ok) return manageError(c, verified.message)
+    if (!verified.ok) return manageError(c, verified.message, guestLang(c, undefined, formLang))
+    const lang = guestLang(c, verified.booking, formLang)
 
     const start = Number(form.get('start'))
     // `isFinite` alone lets a huge-but-finite value through, and it eventually
@@ -3317,7 +3336,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     // which throws an uncaught RangeError instead of this clean error page.
     // 8.64e15 is the JS Date range.
     if (!Number.isSafeInteger(start) || Math.abs(start) > 8.64e15) {
-      return manageError(c, 'No new time was chosen.')
+      return manageError(c, 'manage.err.noTime', lang)
     }
 
     const old = verified.booking
@@ -3326,19 +3345,20 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     // each submission creates ANOTHER booking that consumes another slot on
     // the host's calendar.
     if (old.status !== 'confirmed') {
-      return manageError(c, 'This booking is no longer active.')
+      return manageError(c, 'manage.err.inactive', lang)
     }
-    if (isDrifted(old)) return manageError(c, BOOKING_DRIFTED_MESSAGE)
+    if (isDrifted(old)) return manageError(c, 'bookingDrifted.body', lang)
 
     const repos = ports.repositories(guestScope())
     const eventType = await repos.eventTypes.byId(old.eventTypeId)
     const host = await repos.users.byId(old.hostUserId)
-    if (!eventType || !host) return manageError(c, 'This booking can no longer be moved.')
+    if (!eventType || !host) return manageError(c, 'manage.err.cannotMove', lang)
 
     const hosts = await hostsForReschedule(repos, eventType, old, host)
     const moved = await rescheduleBooking(repos, old, eventType, host, hosts, start)
     if (!moved.ok) {
-      return c.html(
+      return guestHtml(
+        c,
         bookingDetailPage({
           brandName,
           booking: old,
@@ -3346,30 +3366,37 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
           host,
           token,
           purpose: 'reschedule',
-          error:
+          locale: lang.locale,
+          error: t(
+            lang.locale,
             moved.reason === 'calendar_unavailable'
-              ? CALENDAR_UNAVAILABLE_MOVE
+              ? 'manage.err.calendarUnavailable'
               : moved.reason === 'slot_taken'
-                ? 'That time was just taken. Pick another one.'
-                : 'This booking was already updated elsewhere. Refresh and try again.',
+                ? 'manage.err.taken'
+                : 'manage.err.superseded',
+          ),
         }),
         409,
+        lang,
       )
     }
 
     // Carry the new booking's token: /booking/:id without one is a 400, so
     // a guest who successfully rescheduled landed on an error page.
     const nextToken = moved.manageToken
+    // The redirect target carries a fresh credential: the same no-referrer / no-store rules apply to the redirect itself.
+    for (const [k, v] of Object.entries(manageHeaders())) c.header(k, v)
     return c.redirect(
       `/booking/${encodeURIComponent(moved.booking.id)}` +
-        (nextToken ? `?token=${encodeURIComponent(nextToken)}` : ''),
+        (nextToken ? `?token=${encodeURIComponent(nextToken)}` : '') +
+        (lang.explicit ? `${nextToken ? '&' : '?'}lang=${lang.locale}` : ''),
       302,
     )
   })
 
   type ManageResult =
     | { ok: true; booking: Booking; purpose: ManageTokenPurpose }
-    | { ok: false; message: string }
+    | { ok: false; message: MessageKey }
 
   /**
    * Verify a guest manage token.
@@ -3390,13 +3417,13 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     expected?: ManageTokenPurpose,
   ): Promise<ManageResult> {
     const parsed = parseManageToken(token)
-    if (!parsed) return { ok: false, message: 'The link is incomplete or was cut short by an email client.' }
+    if (!parsed) return { ok: false, message: 'manage.err.incomplete' }
     // A 'manage' token authorises both actions — it is what the coordinator
     // actually issues. Pinning to 'cancel'/'reschedule' made every real guest
     // link 400 on both, while the tests passed because they seeded purposes
     // production never mints.
     if (expected && parsed.purpose !== expected && parsed.purpose !== 'manage') {
-      return { ok: false, message: 'This link cannot perform that action.' }
+      return { ok: false, message: 'manage.err.wrongAction' }
     }
 
     const result = await verifyManageToken(
@@ -3405,10 +3432,10 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
       parsed.purpose,
       ports.clock.now(),
     )
-    if (!result.ok) return { ok: false, message: 'The link is no longer valid.' }
+    if (!result.ok) return { ok: false, message: 'manage.err.invalid' }
     // The token names a booking; the URL must not disagree with it.
     if (result.booking.id !== expectedBookingId) {
-      return { ok: false, message: 'The link is no longer valid.' }
+      return { ok: false, message: 'manage.err.invalid' }
     }
     return { ok: true, booking: result.booking, purpose: parsed.purpose }
   }
@@ -3420,8 +3447,48 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     return result.allowed
   }
 
-  function manageError(c: Ctx, message: string): Response | Promise<Response> {
-    return c.html(manageLinkErrorPage(brandName, message), 400)
+  /**
+   * The guest's language on a manage route: `?lang=` (or the form's hidden
+   * `lang`) > cookie > the locale stored on the booking > Accept-Language.
+   * `guestLocale` is the column another unit adds to `bookings`; read
+   * defensively so this file compiles and behaves before that lands.
+   */
+  function guestLang(c: Ctx, booking?: Booking, formLang?: string): { locale: Locale; explicit: boolean } {
+    const stored = (booking as unknown as { guestLocale?: unknown } | undefined)?.guestLocale
+    let query = formLang && formLang !== '' ? formLang : null
+    if (query === null) {
+      try {
+        query = new URL(c.req.url).searchParams.get('lang')
+      } catch {
+        query = null
+      }
+    }
+    return resolveLocale({
+      query,
+      cookie: c.req.header('cookie') ?? null,
+      stored: typeof stored === 'string' ? stored : null,
+      acceptLanguage: c.req.header('accept-language') ?? null,
+    })
+  }
+
+  /** A guest page that carries a manage token: no-store, no-referrer, noindex, language remembered when the guest chose it. */
+  function guestHtml(
+    c: Ctx,
+    html: string,
+    status: 200 | 400 | 409,
+    lang: { locale: Locale; explicit: boolean },
+  ): Response | Promise<Response> {
+    for (const [k, v] of Object.entries(manageHeaders())) c.header(k, v)
+    if (lang.explicit) c.header('set-cookie', langCookieHeader(lang.locale, secureCookies), { append: true })
+    return c.html(html, status)
+  }
+
+  function manageError(
+    c: Ctx,
+    message: MessageKey,
+    lang: { locale: Locale; explicit: boolean } = guestLang(c),
+  ): Response | Promise<Response> {
+    return guestHtml(c, manageLinkErrorPage(brandName, t(lang.locale, message), lang.locale), 400, lang)
   }
 
   // ===========================================================================

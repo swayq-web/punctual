@@ -6,7 +6,17 @@
  * anyway; these pin the fixes without a database.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { SWAYQ_SURFACES } from '../../src/swayq-surfaces.js'
+
+// The team-owned event type form is a surface SwayQ switches off by default
+// (src/swayq-surfaces.ts); this suite pins its upstream behaviour with it on.
+beforeAll(() => {
+  SWAYQ_SURFACES.teamScheduling = true
+})
+afterAll(() => {
+  SWAYQ_SURFACES.teamScheduling = false
+})
 import type { ResolvedHost } from '../../src/core/domain/hosts.js'
 import type { EventType, Schedule, Team, User } from '../../src/core/domain/types.js'
 import { hostsRow } from '../../src/http/pages/booking.js'

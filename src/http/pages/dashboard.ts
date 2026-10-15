@@ -51,8 +51,9 @@ import { DIGEST_HOURS } from '../../core/domain/digest.js'
 import type { ZoneTraffic } from '../../adapters/insights/zone-analytics.js'
 import { slotStateClassName } from '../../core/slot-state.js'
 import { slugify } from '../../core/domain/booking-service.js'
-import { formatInZone, localDateString, offsetLabel } from '../../core/time/zone.js'
+import { formatInZone, offsetLabel } from '../../core/time/zone.js'
 import type { ResolvedHost } from '../../core/domain/hosts.js'
+import { SWAYQ_SURFACES } from '../../swayq-surfaces.js'
 import { avatarHtml, escapeHtml, hostsSentence, joinNames, logoHtml, shellFoot, shellHead } from './booking.js'
 
 // ---------------------------------------------------------------------------
@@ -142,8 +143,17 @@ export function csrfField(csrf: string): string {
  * any `<img>` on any page on the internet, and the CSRF token cannot travel on
  * a link the user might bookmark.
  */
+/** SwayQ surface switches (src/swayq-surfaces.ts): a switched-off surface has no nav entry. */
+function navAllowed(key: NavKey): boolean {
+  if (key === 'insights') return SWAYQ_SURFACES.insights
+  if (key === 'keys') return SWAYQ_SURFACES.apiKeys
+  if (key === 'teams') return SWAYQ_SURFACES.teamScheduling
+  return true
+}
+
 function shellTop(chrome: DashboardChrome, title: string, active: NavKey | null): string {
-  const links = NAV.filter((item) => item.key !== 'admin' || chrome.user.role === 'admin')
+  const links = NAV.filter((item) => navAllowed(item.key))
+    .filter((item) => item.key !== 'admin' || chrome.user.role === 'admin')
     .map((item) => {
       const current = item.key === active ? ' aria-current="page"' : ''
       return `<a class="pu-nav-link" href="${item.href}"${current}>${escapeHtml(item.label)}</a>`
@@ -940,6 +950,8 @@ ${
  * crafted scheduling value cannot make a personal event round-robin.
  */
 function ownershipFields(d: EventTypeFormData, teams: Team[], errors: Record<string, string>): string {
+  // Team-owned event types (round robin, collective) are switched off for SwayQ; a new one is personal.
+  if (!SWAYQ_SURFACES.teamScheduling && !d.eventType?.ownerTeamId) return ''
   // No teams, no selects — but a crafted POST naming a team the user is not
   // in still needs its refusal VISIBLE, or the 400 renders with no explanation.
   if (teams.length === 0) return fieldError('owner', errors)
@@ -1947,13 +1959,16 @@ export function connectionsPage(d: ConnectionsPageData): string {
       ? `<p class="pu-muted">No calendars connected. Bookings still work — nothing will be checked for conflicts.</p>`
       : d.connections.map((c) => connectionCard(d, c)).join('\n')
 
+  // Microsoft is switched off for SwayQ (src/swayq-surfaces.ts).
+  const providers = d.availableProviders.filter((p) => p !== 'microsoft' || SWAYQ_SURFACES.microsoft)
+
   // The reader is the host, who usually cannot set a secret; only when they
   // also run the deployment is the fix theirs to make.
   const connectButtons =
-    d.availableProviders.length === 0
+    providers.length === 0
       ? `<p class="pu-muted">This deployment has no Google or Microsoft credentials yet. If you run it, see
        <a href="/docs/self-hosting">self-hosting &rarr; calendar providers</a>; otherwise ask your admin.</p>`
-      : d.availableProviders
+      : providers
           .map(
             (p) =>
               `<a class="pu-btn" style="margin-right:.75rem" href="/auth/${p}/start?purpose=calendar">Connect ${escapeHtml(providerLabel(p))} Calendar</a>`,
@@ -2305,19 +2320,25 @@ export function channelsPanel(o: {
   ).join('')
   return `${list}
   <details class="pu-channel-add"${o.errors[o.errorKey] ? ' open' : ''}>
-    <summary>Add a Slack or Telegram channel</summary>
+    <summary>${SWAYQ_SURFACES.telegram ? 'Add a Slack or Telegram channel' : 'Add a Slack channel'}</summary>
     <form method="post" action="${escapeHtml(o.action)}" style="margin-top:.75rem">
       ${csrfField(o.csrf)}
       ${fieldError(o.errorKey, o.errors)}
-      <fieldset style="border:0;padding:0;margin:0 0 .75rem">
+      ${
+        SWAYQ_SURFACES.telegram
+          ? `<fieldset style="border:0;padding:0;margin:0 0 .75rem">
         <legend class="pu-sr">Service</legend>
         <label style="display:inline-flex;align-items:center;gap:.3rem;margin-right:1rem;font-weight:400"><input type="radio" name="kind" value="slack"${kind === 'slack' ? ' checked' : ''}> Slack</label>
         <label style="display:inline-flex;align-items:center;gap:.3rem;font-weight:400"><input type="radio" name="kind" value="telegram"${kind === 'telegram' ? ' checked' : ''}> Telegram</label>
-      </fieldset>
+      </fieldset>`
+          : '<input type="hidden" name="kind" value="slack">'
+      }
       <label for="${p}-webhook">Slack incoming webhook URL</label>
       <input id="${p}-webhook" name="webhook_url" type="url" inputmode="url" maxlength="300" placeholder="https://hooks.slack.com/services/T…/B…/…" value="${escapeHtml(draft.webhookUrl ?? '')}" autocomplete="off">
-      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Slack: your workspace → Apps → Incoming Webhooks → Add to a channel, then paste the URL. Leave blank for Telegram.</p>
-      <div class="pu-grid" style="grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:0 1rem">
+      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Slack: your workspace → Apps → Incoming Webhooks → Add to a channel, then paste the URL.${SWAYQ_SURFACES.telegram ? ' Leave blank for Telegram.' : ''}</p>
+      ${
+        SWAYQ_SURFACES.telegram
+          ? `<div class="pu-grid" style="grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:0 1rem">
         <div>
           <label for="${p}-token">Telegram bot token</label>
           <input id="${p}-token" name="bot_token" type="password" maxlength="100" placeholder="123456789:AAH…" autocomplete="off">
@@ -2327,7 +2348,9 @@ export function channelsPanel(o: {
           <input id="${p}-chat" name="chat_id" maxlength="40" placeholder="-1001234567890 or @channel" value="${escapeHtml(draft.chatId ?? '')}" autocomplete="off">
         </div>
       </div>
-      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Telegram: make a bot with @BotFather, add it to the group or channel, and get the chat id from @userinfobot or the bot's getUpdates. Leave blank for Slack.</p>
+      <p class="pu-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">Telegram: make a bot with @BotFather, add it to the group or channel, and get the chat id from @userinfobot or the bot's getUpdates. Leave blank for Slack.</p>`
+          : ''
+      }
       <p style="font-weight:600;margin:0 0 .25rem">Tell me about</p>
       <div>${events}</div>
       <div style="margin-top:.75rem"><button class="pu-btn" type="submit">Add channel</button></div>
@@ -2366,7 +2389,10 @@ export function settingsPage(d: SettingsPageData): string {
   <div class="pu-profile">
     <div class="pu-profile-photo">
       ${avatarHtml({ key: d.user.avatarKey, name: d.user.name, size: 88 })}
-      <form method="post" action="/dashboard/settings/avatar" enctype="multipart/form-data">
+      ${
+        !SWAYQ_SURFACES.avatars
+          ? ''
+          : `<form method="post" action="/dashboard/settings/avatar" enctype="multipart/form-data">
         ${csrfField(d.csrf)}
         <label class="pu-btn pu-btn-ghost pu-file-btn">Upload photo
           <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp" class="pu-sr"
@@ -2383,7 +2409,8 @@ export function settingsPage(d: SettingsPageData): string {
           : ''
       }
       <p class="pu-muted" style="font-size:.75rem;margin:0;text-align:center">PNG, JPEG or WebP,<br>up to 5&nbsp;MB</p>
-      ${fieldError('avatar', errors)}
+      ${fieldError('avatar', errors)}`
+      }
     </div>
     <form method="post" action="/dashboard/settings/profile" class="pu-profile-fields">
       ${csrfField(d.csrf)}
@@ -2449,188 +2476,11 @@ export function settingsPage(d: SettingsPageData): string {
 }
 
 // ---------------------------------------------------------------------------
-// Guest manage page
+// Guest manage page: moved to ./manage.ts (guest-facing, localized, SwayQ skin).
+// Re-exported so existing importers keep working.
 // ---------------------------------------------------------------------------
 
-export interface BookingDetailPageData {
-  brandName: string
-  booking: Booking
-  /** Null when the event type has since been deleted; the booking still stands. */
-  eventType: EventType | null
-  host: User
-  /**
-   * The signed manage token from the query string. It is the credential
-   * (ADR-0005 §4) and travels back on every form, which is also why these
-   * forms carry no CSRF token: there is no session and no ambient authority to
-   * forge, exactly as on the public booking page (ADR-0005 §5).
-   */
-  token: string
-  /** What this token is allowed to do. A cancel link cannot reschedule. */
-  /**
-   * The token's real purpose. `manage` authorises BOTH actions and is the only
-   * purpose the coordinator mints, so narrowing this type is what previously
-   * hid the cancel form from every guest.
-   */
-  purpose: 'manage' | 'cancel' | 'reschedule'
-  /** Times offered for a reschedule, when the guest picked a day. */
-  slots?: Slot[]
-  selectedDate?: string
-  /** Set once the guest chose a time, so the page can ask for confirmation. */
-  newStart?: number
-  error?: string
-}
-
-export function bookingDetailPage(d: BookingDetailPageData): string {
-  const tz = d.booking.guestTimezone
-  const when = formatInZone(d.booking.startUtc, tz, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-  const title = d.eventType?.title ?? 'Your booking'
-  const cancelled = d.booking.status !== 'confirmed'
-  const tokenField = `<input type="hidden" name="token" value="${escapeHtml(d.token)}">`
-
-  return (
-    shellHead({ title: `${title} · ${d.brandName}`, brandName: d.brandName }) +
-    `<section class="pu-card" aria-label="Your booking">
-  <p><span class="pu-badge"${cancelled ? ' style="background:var(--pu-paper-dim);color:var(--pu-ink-500)"' : ''}>${escapeHtml(statusLabel(d.booking))}</span></p>
-  <h1>${escapeHtml(title)}</h1>
-  <p>with ${escapeHtml(d.host.name || d.host.slug)}</p>
-  <p class="pu-time"><strong>${escapeHtml(when)}</strong><br>
-    <span class="pu-muted">${escapeHtml(tz)} (${escapeHtml(offsetLabel(d.booking.startUtc, tz))}) · ${
-      Math.round((d.booking.endUtc - d.booking.startUtc) / 60000)
-    } min</span></p>
-  ${d.eventType ? `<p class="pu-muted">${escapeHtml(locationLabel(d.eventType))}</p>` : ''}
-  ${d.error ? `<p class="pu-err" role="alert">${escapeHtml(d.error)}</p>` : ''}
-</section>` +
-    (cancelled
-      ? `<section class="pu-card" style="margin-top:1.5rem">
-  <p class="pu-muted">This booking is no longer active, so there is nothing left to change.</p>
-</section>`
-      : rescheduleSection(d, tokenField) + cancelSection(d, tokenField)) +
-    shellFoot()
-  )
-}
-
-function statusLabel(b: Booking): string {
-  switch (b.status) {
-    case 'cancelled':
-      return 'Cancelled'
-    case 'rescheduled':
-      return 'Moved'
-    default:
-      return 'Confirmed'
-  }
-}
-
-function rescheduleSection(d: BookingDetailPageData, tokenField: string): string {
-  // Same as cancelSection: 'manage' authorises this too.
-  if (d.purpose !== 'reschedule' && d.purpose !== 'manage') {
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Reschedule">
-  <h2>Need a different time?</h2>
-  <p class="pu-muted">Use the reschedule link in your confirmation email — this one only cancels.</p>
-</section>`
-  }
-
-  const path = d.eventType
-    ? `/booking/${encodeURIComponent(d.booking.id)}?token=${encodeURIComponent(d.token)}`
-    : null
-  if (!path) {
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Reschedule">
-  <h2>Reschedule</h2>
-  <p class="pu-muted">This event type is no longer offered, so it cannot be rescheduled. Cancel and book again.</p>
-</section>`
-  }
-
-  if (d.newStart !== undefined) {
-    const when = formatInZone(d.newStart, d.booking.guestTimezone, {
-      weekday: 'long',
-      month: 'long',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    })
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Confirm new time">
-  <h2>Move to this time?</h2>
-  <p class="pu-time"><strong>${escapeHtml(when)}</strong><br>
-    <span class="pu-muted">${escapeHtml(d.booking.guestTimezone)}</span></p>
-  <form method="post" action="/booking/${encodeURIComponent(d.booking.id)}/reschedule">
-    ${tokenField}
-    <input type="hidden" name="start" value="${d.newStart}">
-    <div style="display:flex;gap:.75rem;flex-wrap:wrap">
-      <button class="pu-btn" type="submit">Confirm new time</button>
-      <a class="pu-btn pu-btn-ghost" href="${escapeHtml(path)}">Back</a>
-    </div>
-  </form>
-</section>`
-  }
-
-  const date = d.selectedDate ?? localDateString(d.booking.startUtc, d.booking.guestTimezone)
-  const slots = d.slots ?? []
-  const list =
-    slots.length === 0
-      ? '<p class="pu-muted">No times available on this day.</p>'
-      : `<div class="pu-slots">
-    ${slots
-      .map((s) => {
-        const label = formatInZone(s.start, d.booking.guestTimezone, { hour: 'numeric', minute: '2-digit' })
-        const href = `${path}&date=${encodeURIComponent(date)}&start=${s.start}`
-        return `<a class="${slotStateClassName('available')}" href="${escapeHtml(href)}">
-      <time datetime="${new Date(s.start).toISOString()}">${escapeHtml(label)}</time></a>`
-      })
-      .join('\n    ')}
-  </div>`
-
-  return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Reschedule">
-  <h2>Pick a new time</h2>
-  <form method="get" action="/booking/${encodeURIComponent(d.booking.id)}">
-    <input type="hidden" name="token" value="${escapeHtml(d.token)}">
-    <label for="date">Day</label>
-    <input id="date" name="date" type="date" value="${escapeHtml(date)}">
-    <div style="margin-top:.75rem"><button class="pu-btn pu-btn-ghost" type="submit">Show times</button></div>
-  </form>
-  <p class="pu-muted" style="font-size:.8125rem;margin-top:1rem">
-    Times in ${escapeHtml(d.booking.guestTimezone)}</p>
-  ${list}
-</section>`
-}
-
-function cancelSection(d: BookingDetailPageData, tokenField: string): string {
-  // A 'manage' token authorises both actions, and it is the ONLY purpose the
-  // coordinator mints. Refusing anything that is not literally 'cancel' left
-  // every real guest looking at "use the cancel link in your email" — while
-  // that email's cancel link is this same URL. The loop never terminated.
-  if (d.purpose !== 'cancel' && d.purpose !== 'manage') {
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Cancel">
-  <h2>Need to cancel?</h2>
-  <p class="pu-muted">Use the cancel link in your confirmation email — this one only reschedules.</p>
-</section>`
-  }
-  return `<form class="pu-card" method="post" style="margin-top:1.5rem"
-      action="/booking/${encodeURIComponent(d.booking.id)}/cancel">
-  ${tokenField}
-  <h2>Cancel this booking</h2>
-  <p class="pu-muted">The host is notified and the time is released for someone else.</p>
-  <button class="pu-btn pu-btn-danger" type="submit">Cancel booking</button>
-</form>`
-}
-
-/** Shared "this link is not valid" page. Says nothing about why. */
-export function manageLinkErrorPage(brandName: string, message: string): string {
-  return (
-    shellHead({ title: `Link not valid · ${brandName}`, brandName }) +
-    `<section class="pu-card">
-  <h1>This link is not valid</h1>
-  <p class="pu-muted">${escapeHtml(message)}</p>
-  <p class="pu-muted">Links expire, and rescheduling replaces the ones sent before it. The most recent
-     confirmation email always has a working link.</p>
-</section>` +
-    shellFoot()
-  )
-}
+export { bookingDetailPage, manageLinkErrorPage, type BookingDetailPageData } from './manage.js'
 
 // ---------------------------------------------------------------------------
 // Host bookings — the list, one booking, and the host's reschedule picker
@@ -2714,6 +2564,17 @@ function bookingListRow(row: BookingListRow, tz: string): string {
         ${statusBadge(b)}
       </a>
     </li>`
+}
+
+function statusLabel(b: Booking): string {
+  switch (b.status) {
+    case 'cancelled':
+      return 'Cancelled'
+    case 'rescheduled':
+      return 'Moved'
+    default:
+      return 'Confirmed'
+  }
 }
 
 /** Confirmed is the green dot; cancelled the danger ring; moved is neutral — the replacement carries the green. */

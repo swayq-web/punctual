@@ -45,6 +45,8 @@ export interface BookingRequest {
   guestName: string
   guestEmail: string
   guestTimezone: string
+  /** The language the guest booked in; stored so later mail and manage pages speak it. */
+  guestLocale?: string | null
   answers: Record<string, string>
   now: number
   /** Provided by the caller; the DO already deduplicated by idempotency key. */
@@ -210,6 +212,7 @@ export function prepareBooking(req: BookingRequest): BookingResult {
     guestName: req.guestName,
     guestEmail: req.guestEmail.toLowerCase(),
     guestTimezone: req.guestTimezone,
+    guestLocale: req.guestLocale ?? null,
     startUtc: req.start,
     endUtc: end,
     // Stamped in the PRIMARY host's timezone, because that is whose per-day

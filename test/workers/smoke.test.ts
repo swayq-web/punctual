@@ -1,6 +1,11 @@
 import { createExecutionContext, env } from 'cloudflare:test'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { clampMonth } from '../../src/http/router.js'
+import { SWAYQ_SURFACES } from '../../src/swayq-surfaces.js'
+
+// This suite exercises an upstream surface that SwayQ switches off by default
+// (src/swayq-surfaces.ts); it runs with that one surface on.
+Object.assign(SWAYQ_SURFACES, { avatars: true })
 
 /**
  * `/health` must SAY when the deployment is silently degraded.
@@ -311,7 +316,7 @@ describe('a fresh page load shows today, not "pick a day"', () => {
     // what time the suite happens to run.
     const today = new Date().toISOString().slice(0, 10)
     const [y, m, d] = today.split('-').map(Number)
-    const todayHeader = new Intl.DateTimeFormat('en-US', {
+    const todayHeader = new Intl.DateTimeFormat('en-GB', {
       weekday: 'long',
       month: 'long',
       day: 'numeric',
