@@ -29,10 +29,11 @@ export interface SlotService {
     range: Interval
     scope?: RequestScope
     /**
-     * Called once per host whose external calendar could not be read. That
-     * host contributes NO slots (it is treated as busy for the whole range,
-     * never as free), so a caller that gets an empty list can tell "nothing
-     * free" apart from "we could not check" and say so honestly.
+     * Called once per unreadable host whose failure can block EVERY slot
+     * (the personal host, a required collective host, or every round-robin
+     * member when none could be read). An unreadable host contributes NO
+     * slots (busy for the whole range, never free), so a caller that gets an
+     * empty list can tell "nothing free" apart from "we could not check".
      */
     onCalendarUnavailable?: (hostUserId: string) => void
   }): Promise<Slot[]>
@@ -122,6 +123,7 @@ export function createSlotService(ports: EnginePorts): SlotService {
       // hosts the sequential version costs N x (availability + connections)
       // round trips, and round-trip count is what the latency budget is spent
       // on (ADR-0007, and the measurement in EventTypeRepository).
+      const failedHostIds: string[] = []
       const built: Array<HostAvailabilityInput | null> = await Promise.all(
         hostUsers.map(async (user) => {
           // A team host's per-event schedule (event_type_hosts) wins over
@@ -133,7 +135,7 @@ export function createSlotService(ports: EnginePorts): SlotService {
             externalBusyFor(ports, repos, user.id, busyRange),
           ])
           if (!availability) return null
-          if (external === CALENDAR_UNAVAILABLE) onCalendarUnavailable?.(user.id)
+          if (external === CALENDAR_UNAVAILABLE) failedHostIds.push(user.id)
           const perDay = await perDayCounts(repos, user, range, eventType, availability.timezone)
           return {
             hostUserId: user.id,
@@ -155,6 +157,22 @@ export function createSlotService(ports: EnginePorts): SlotService {
         }),
       )
       const hosts = built.filter((h): h is HostAvailabilityInput => h !== null)
+
+      // Report only failures that can account for an EMPTY list on their
+      // own, so the page never blames the calendar for a month that is
+      // genuinely full: the personal host, a REQUIRED collective host, or
+      // round-robin when no member could be read at all. An optional
+      // collective host, or one unreadable round-robin member beside a
+      // readable one, cannot block every slot.
+      if (onCalendarUnavailable && failedHostIds.length > 0) {
+        const blocking =
+          eventType.schedulingType === 'round_robin'
+            ? failedHostIds.length === hosts.length
+              ? failedHostIds
+              : []
+            : failedHostIds.filter((id) => settings.get(id)?.required !== false)
+        for (const id of blocking) onCalendarUnavailable(id)
+      }
 
       return computeSlots({ eventType, hosts, range, now: ports.clock.now() })
     },

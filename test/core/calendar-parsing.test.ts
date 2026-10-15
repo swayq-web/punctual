@@ -74,11 +74,15 @@ describe('parseGoogleFreeBusy', () => {
     expect(parseGoogleFreeBusy({ calendars: { primary: {} } })).toEqual([])
   })
 
-  it('yields [] for an empty, missing or non-object response', () => {
+  it('yields [] for an empty calendars object', () => {
     expect(parseGoogleFreeBusy({ calendars: {} })).toEqual([])
-    expect(parseGoogleFreeBusy({})).toEqual([])
-    expect(parseGoogleFreeBusy(null)).toEqual([])
-    expect(parseGoogleFreeBusy('nope')).toEqual([])
+  })
+
+  it('throws on a missing calendars key or a non-object response: unparseable is unavailable, not free', () => {
+    expect(() => parseGoogleFreeBusy({})).toThrow(/no calendars/)
+    expect(() => parseGoogleFreeBusy({ kind: 'calendar#freeBusy', calendars: null })).toThrow(/no calendars/)
+    expect(() => parseGoogleFreeBusy(null)).toThrow(/not an object/)
+    expect(() => parseGoogleFreeBusy('nope')).toThrow(/not an object/)
   })
 
   it('drops degenerate zero-length busy blocks', () => {
@@ -218,10 +222,14 @@ describe('parseGraphSchedule', () => {
     expect(parseGraphSchedule({ value: [{ scheduleId: 'a@b.com', scheduleItems: [] }] })).toEqual([])
   })
 
-  it('yields [] for an empty or missing value collection', () => {
+  it('yields [] for an empty value collection', () => {
     expect(parseGraphSchedule({ value: [] })).toEqual([])
-    expect(parseGraphSchedule({})).toEqual([])
-    expect(parseGraphSchedule(null)).toEqual([])
+  })
+
+  it('throws on a missing value array or a non-object response: unparseable is unavailable, not free', () => {
+    expect(() => parseGraphSchedule({})).toThrow(/no value array/)
+    expect(() => parseGraphSchedule({ value: 'x' })).toThrow(/no value array/)
+    expect(() => parseGraphSchedule(null)).toThrow(/not an object/)
   })
 
   it('does not fall back to availabilityView when scheduleItems is present but empty', () => {
@@ -401,9 +409,12 @@ describe('partitionConnections', () => {
     expect(read).toHaveLength(1)
   })
 
-  it('excludes a Google connection for reads when calendarIdsRead is empty', () => {
+  // The Google adapter reads `primary` when the selection is empty, so the
+  // read set must include it; excluding it skipped conflict checking
+  // entirely and booked over real meetings (SWA-1285).
+  it('includes a Google connection for reads even with an empty calendarIdsRead', () => {
     const { read } = partitionConnections([conn({ provider: 'google', calendarIdsRead: [] })])
-    expect(read).toHaveLength(0)
+    expect(read).toHaveLength(1)
   })
 
   it('includes a Google connection once a calendar is selected', () => {

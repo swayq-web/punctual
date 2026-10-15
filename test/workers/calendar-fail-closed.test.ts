@@ -18,6 +18,7 @@ import { buildApiRoutes } from '../../src/http/api/rest.js'
 import { createApiKey } from '../../src/core/domain/auth-flows.js'
 import { parseGoogleFreeBusy } from '../../src/adapters/google/provider.js'
 import { CalendarReconnectRequiredError } from '../../src/adapters/oauth.js'
+import { saveCalendarConnection } from '../../src/http/calendar-connect.js'
 import type { CalendarProvider, EnginePorts } from '../../src/ports.js'
 import type { CalendarConnection, EventType, User } from '../../src/core/domain/types.js'
 
@@ -35,7 +36,7 @@ function keyMaterial(seed: number): string {
 
 // ---- The fake provider: its failure mode is the input under test ---------
 
-type Mode = 'ok' | 'outage' | 'freebusy_error' | 'revoked'
+type Mode = 'ok' | 'busy' | 'outage' | 'freebusy_error' | 'revoked' | 'no_calendars_key'
 const modes = new Map<string, Mode>()
 
 const provider: CalendarProvider = {
@@ -44,6 +45,11 @@ const provider: CalendarProvider = {
     const mode = modes.get(conn.id) ?? 'ok'
     if (mode === 'outage') throw new Error('google freeBusy 503 Service Unavailable')
     if (mode === 'revoked') throw new CalendarReconnectRequiredError('google', conn.id, 'invalid_grant')
+    if (mode === 'busy') return [{ start: START, end: END }]
+    if (mode === 'no_calendars_key') {
+      // A 200 whose body has no `calendars` at all: unparseable, not free.
+      return parseGoogleFreeBusy({ kind: 'calendar#freeBusy' })
+    }
     if (mode === 'freebusy_error') {
       // A 200 response whose calendar entry carries errors: the REAL parser
       // throws on it, which is what the commit path must not swallow.
@@ -123,7 +129,12 @@ async function seedUser(ports: EnginePorts, label: string): Promise<User> {
 }
 
 /** A read connection whose getBusy follows `modes`. */
-async function connect(ports: EnginePorts, user: User, mode: Mode = 'ok'): Promise<CalendarConnection> {
+async function connect(
+  ports: EnginePorts,
+  user: User,
+  mode: Mode = 'ok',
+  calendarIdsRead: string[] = ['primary'],
+): Promise<CalendarConnection> {
   const conn: CalendarConnection = {
     id: `conn_fc_${++n}`,
     userId: user.id,
@@ -131,7 +142,7 @@ async function connect(ports: EnginePorts, user: User, mode: Mode = 'ok'): Promi
     providerAccountEmail: user.email,
     encryptedTokens: 'unused-by-the-fake',
     keyVersion: 1,
-    calendarIdsRead: ['primary'],
+    calendarIdsRead,
     calendarIdWrite: null,
     syncStatus: 'ok',
     createdAt: Date.now(),
@@ -363,6 +374,79 @@ describe('commit: an unreadable calendar refuses the booking', () => {
   })
 })
 
+describe('commit: more fail-closed edges', () => {
+  it('round-robin: one member unreadable and the readable one busy is calendar_unavailable, not slot_taken', async () => {
+    const ports = testPorts()
+    const a = await seedUser(ports, 'rrda')
+    const b = await seedUser(ports, 'rrdb')
+    await connect(ports, a, 'outage')
+    await connect(ports, b, 'busy')
+    const et = await teamEvent(ports, 'round_robin', [
+      { user: a, required: true },
+      { user: b, required: true },
+    ])
+
+    const outcome = await ports.coordinator.book(a.id, attempt(et, [a.id, b.id]))
+    expect(outcome).toEqual({ ok: false, reason: 'calendar_unavailable' })
+    expect(await bookingsFor(et.id)).toBe(0)
+  })
+
+  it('a 200 freeBusy with no calendars key refuses instead of reading as free', async () => {
+    const ports = testPorts()
+    const host = await seedUser(ports, 'nokey')
+    await connect(ports, host, 'no_calendars_key')
+    const et = await personalEvent(ports, host)
+    const outcome = await ports.coordinator.book(host.id, attempt(et, [host.id]))
+    expect(outcome).toEqual({ ok: false, reason: 'calendar_unavailable' })
+  })
+
+  it('a Google connection with an EMPTY read list is still read (as primary): down refuses', async () => {
+    const ports = testPorts()
+    const host = await seedUser(ports, 'empty')
+    await connect(ports, host, 'outage', [])
+    const et = await personalEvent(ports, host)
+    const outcome = await ports.coordinator.book(host.id, attempt(et, [host.id]))
+    expect(outcome).toEqual({ ok: false, reason: 'calendar_unavailable' })
+    expect(await bookingsFor(et.id)).toBe(0)
+  })
+
+  it('a Google connection with an EMPTY read list is still read (as primary): busy primary is not offered or booked', async () => {
+    const ports = testPorts()
+    const host = await seedUser(ports, 'emptyb')
+    await connect(ports, host, 'busy', [])
+    const et = await personalEvent(ports, host)
+    const listed = await createSlotService(ports).forEventType({
+      eventType: et,
+      hostUsers: [host],
+      range: { start: START - 3_600_000, end: START + 3_600_000 },
+    })
+    expect(listed.some((s) => s.start < END && s.end > START)).toBe(false)
+    const outcome = await ports.coordinator.book(host.id, attempt(et, [host.id]))
+    expect(outcome.ok).toBe(false)
+    expect(await bookingsFor(et.id)).toBe(0)
+  })
+
+  it('connect: a Google grant saved while listCalendars fails reads primary, never an empty green selection', async () => {
+    const ports = testPorts()
+    const host = await seedUser(ports, 'conn')
+    const saved = await saveCalendarConnection(
+      {
+        repos: ports.repositories({ consistency: 'bookmark' }),
+        crypto: ports.crypto,
+        clock: ports.clock,
+        listCalendars: async () => {
+          throw new Error('503 backendError')
+        },
+      },
+      host.id,
+      'google',
+      { accessToken: 'at', refreshToken: 'rt', expiresInMs: 3_600_000, scope: 'calendar', accountEmail: '' },
+    )
+    const stored = await ports.repositories({ consistency: 'bookmark' }).connections.byId(saved.connection.id)
+    expect(stored?.calendarIdsRead).toEqual(['primary'])
+  })
+})
+
 // ---- Listing path --------------------------------------------------------
 
 describe('listing: an unreadable calendar offers no slots', () => {
@@ -384,11 +468,52 @@ describe('listing: an unreadable calendar offers no slots', () => {
     expect(none).toEqual([])
     expect(unavailable).toEqual([host.id])
 
+    // The outage continues: a second listing must STILL offer nothing. Were
+    // the failure cached as an empty busy set, this read would hit the cache
+    // and list every slot as free.
+    const still = await slots.forEventType({ eventType: et, hostUsers: [host], range })
+    expect(still).toEqual([])
+
     // Recovery reads live: a failure was never cached as "no busy time"
     // (that would be fail-open) nor as "busy" (that would hide recovery).
     modes.set(conn.id, 'ok')
     const back = await slots.forEventType({ eventType: et, hostUsers: [host], range })
     expect(back.length).toBeGreaterThan(0)
+  })
+
+  it('an optional collective host being unreadable is NOT reported, so a full month says "no times"', async () => {
+    const ports = testPorts()
+    const a = await seedUser(ports, 'nra')
+    const b = await seedUser(ports, 'nrb')
+    await connect(ports, a, 'ok')
+    await connect(ports, b, 'outage')
+    const et = await teamEvent(ports, 'collective', [
+      { user: a, required: true },
+      { user: b, required: false },
+    ])
+    const reported: string[] = []
+    await createSlotService(ports).forEventType({
+      eventType: et,
+      hostUsers: [a, b],
+      range: { start: START, end: START + 3_600_000 },
+      onCalendarUnavailable: (id) => reported.push(id),
+    })
+    expect(reported).toEqual([])
+
+    // A REQUIRED collective host is reported: it alone blocks every slot.
+    const et2 = await teamEvent(ports, 'collective', [
+      { user: a, required: true },
+      { user: b, required: true },
+    ])
+    const reported2: string[] = []
+    const none = await createSlotService(ports).forEventType({
+      eventType: et2,
+      hostUsers: [a, b],
+      range: { start: START, end: START + 3_600_000 },
+      onCalendarUnavailable: (id) => reported2.push(id),
+    })
+    expect(none).toEqual([])
+    expect(reported2).toEqual([b.id])
   })
 
   it('round-robin: the readable member still lists', async () => {
@@ -469,7 +594,7 @@ describe('the public booking page', () => {
     expect(res.status).toBe(503)
     expect(res.headers.get('retry-after')).toBe('30')
     expect(html).toContain('Temporarily unavailable')
-    expect(html).toContain('Nothing has been booked')
+    expect(html).toContain('nothing has been booked')
     expect(await bookingsFor(et.id)).toBe(0)
   })
 
@@ -498,6 +623,33 @@ describe('the public booking page', () => {
       .first<{ host_user_id: string }>()
     expect(row?.host_user_id).toBe(a.id)
     expect(await locksFor(b.id)).toBe(0)
+  })
+})
+
+describe('guest reschedule', () => {
+  it('a refused move says the calendar cannot be checked, not "That time was just taken"', async () => {
+    const ports = testPorts()
+    const host = await seedUser(ports, 'mv')
+    const conn = await connect(ports, host, 'ok')
+    const et = await personalEvent(ports, host)
+    const booked = await ports.coordinator.book(host.id, attempt(et, [host.id]))
+    expect(booked.ok).toBe(true)
+    if (!booked.ok || !booked.manageToken) throw new Error('setup: expected a manage token')
+
+    modes.set(conn.id, 'outage')
+    const form = new FormData()
+    form.set('token', booked.manageToken)
+    form.set('start', String(START + 2 * 3_600_000))
+    const res = await page(ports).request(`/booking/${booked.booking.id}/reschedule`, {
+      method: 'POST',
+      body: form,
+      headers: { 'cf-connecting-ip': `10.0.4.${++n % 250}` },
+    })
+    const html = await res.text()
+    expect(res.status).toBe(409)
+    expect(html).toContain('the booking was not moved')
+    expect(html).not.toContain('That time was just taken')
+    expect(await bookingsFor(et.id)).toBe(1)
   })
 })
 

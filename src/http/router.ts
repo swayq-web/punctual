@@ -681,7 +681,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
 function calendarUnavailableNotice(): string {
   return errorPage(
     'Temporarily unavailable',
-    "We could not check the host's calendar just now, so no time can be confirmed. Nothing has been booked. Please try again in a few minutes.",
+    "We can't check this host's calendar right now, so no times are shown and nothing has been booked. Please try again later or contact the host.",
   )
 }
 

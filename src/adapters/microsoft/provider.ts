@@ -193,9 +193,11 @@ export interface GraphScheduleWindow {
  */
 export function parseGraphSchedule(json: unknown, window?: GraphScheduleWindow): Interval[] {
   const out: Interval[] = []
-  if (!isRecord(json)) return out
+  // Unparseable is unavailable, never free (SWA-1285): a 200 with no `value`
+  // array says nothing about busy time.
+  if (!isRecord(json)) throw new CalendarApiError('microsoft', 'getSchedule response is not an object')
   const value = json['value']
-  if (!Array.isArray(value)) return out
+  if (!Array.isArray(value)) throw new CalendarApiError('microsoft', 'getSchedule response has no value array')
 
   for (const info of value) {
     if (!isRecord(info)) continue

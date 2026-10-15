@@ -453,14 +453,14 @@ export function partitionConnections(connections: CalendarConnection[]): {
   write: CalendarConnection[]
 } {
   return {
-    // Microsoft's `getBusy` reads the whole mailbox by default
-    // (providerAccountEmail) and only narrows to `calendarIdsRead` when it's
-    // non-empty — see adapters/microsoft/provider.ts. Google has no such
-    // fallback: an empty `calendarIdsRead` there genuinely means nothing was
-    // selected, so excluding it is correct. Filtering Microsoft out here too
-    // meant `getBusy` was never even called for it, silently disabling
-    // conflict checking rather than fixing which identifier it queried.
-    read: connections.filter((c) => c.provider === 'microsoft' || c.calendarIdsRead.length > 0),
+    // EVERY connection is read. Both adapters treat an empty
+    // `calendarIdsRead` as "the account's own calendar": Microsoft falls back
+    // to the mailbox (providerAccountEmail), Google to `primary` (see
+    // adapters/google/provider.ts getBusy). Excluding an empty-selection
+    // Google connection here meant `getBusy` was never called for it, so a
+    // connection saved during a listCalendars outage booked over real
+    // meetings (SWA-1285). The read set now matches what the adapters read.
+    read: connections.slice(),
     write: connections.filter((c) => c.calendarIdWrite && c.syncStatus === 'ok'),
   }
 }
