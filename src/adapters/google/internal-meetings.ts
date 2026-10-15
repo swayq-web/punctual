@@ -62,7 +62,7 @@ export interface InsertInternalEvent {
 
 export type InsertOutcome =
   | { kind: 'created'; event: InternalGoogleEvent }
-  /** 409: an event with this id already exists on the calendar — the caller decides what that means. */
+  /** 409: an event with this id already exists on the calendar; the caller decides what that means. */
   | { kind: 'exists' }
 
 function eventUrl(calendarId: string, eventId: string): URL {
