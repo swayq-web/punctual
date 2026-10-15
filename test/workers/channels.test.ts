@@ -31,6 +31,11 @@ import type {
   HostCoordinator,
   QueuePort,
 } from '../../src/ports.js'
+import { SWAYQ_SURFACES } from '../../src/swayq-surfaces.js'
+
+// This suite exercises an upstream surface that SwayQ switches off by default
+// (src/swayq-surfaces.ts); it runs with that one surface on.
+Object.assign(SWAYQ_SURFACES, { telegram: true })
 
 const db = env.DB
 const BASE = 'https://punctual.test'

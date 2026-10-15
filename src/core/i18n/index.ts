@@ -5,7 +5,8 @@
  * manage pages and guest emails. The host dashboard stays English.
  *
  * Locale precedence (`resolveLocale`): `?lang=` beats the `pu_lang` cookie,
- * which beats `Accept-Language`, which beats English. A `?lang=` that is not a
+ * which beats the locale stored on the booking (manage pages only), which
+ * beats `Accept-Language`, which beats English. A `?lang=` that is not a
  * supported locale is ignored rather than falling through to a surprise.
  *
  * Pure and runtime-neutral (no Cloudflare imports), so the core test project
@@ -96,6 +97,8 @@ export interface LocaleInputs {
   /** The `lang` query parameter, if present. */
   query?: string | null
   cookie?: string | null
+  /** The locale stored on the booking (`bookings.guest_locale`): what the guest chose when they booked. */
+  stored?: string | null
   acceptLanguage?: string | null
 }
 
@@ -109,11 +112,12 @@ export function resolveLocale(input: LocaleInputs): ResolvedLocale {
   if (isLocale(input.query)) return { locale: input.query, explicit: true }
   const fromCookie = cookieValue(input.cookie, LANG_COOKIE)
   if (isLocale(fromCookie)) return { locale: fromCookie, explicit: false }
+  if (isLocale(input.stored)) return { locale: input.stored, explicit: false }
   return { locale: parseAcceptLanguage(input.acceptLanguage) ?? DEFAULT_LOCALE, explicit: false }
 }
 
 /** Convenience over a Fetch `Request` + URL. */
-export function localeFromRequest(request: Request): ResolvedLocale {
+export function localeFromRequest(request: Request, stored?: string | null): ResolvedLocale {
   let query: string | null = null
   try {
     query = new URL(request.url).searchParams.get('lang')
@@ -123,6 +127,7 @@ export function localeFromRequest(request: Request): ResolvedLocale {
   return resolveLocale({
     query,
     cookie: request.headers.get('cookie'),
+    stored,
     acceptLanguage: request.headers.get('accept-language'),
   })
 }

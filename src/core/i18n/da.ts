@@ -82,7 +82,7 @@ export const da: Record<MessageKey, string> = {
   'taken.cta': 'Se ledige tider',
   'calendarUnavailable.title': 'Booking er midlertidigt utilgængelig',
   'calendarUnavailable.body':
-    'Vi kan ikke få fat i værtens kalender lige nu og kan derfor ikke vise pålidelige tider. Prøv igen om et par minutter.',
+    'Vi kan ikke tjekke værtens kalender lige nu, så der vises ingen tider, og der er ikke booket noget. Prøv igen senere, eller kontakt værten.',
 
   // --- confirmation -------------------------------------------------------
   'booked.pageTitle': 'Booket',
@@ -133,7 +133,9 @@ export const da: Record<MessageKey, string> = {
   'manage.err.noTime': 'Der blev ikke valgt et nyt tidspunkt.',
   'manage.err.cannotMove': 'Bookingen kan ikke flyttes længere.',
   'manage.err.incomplete': 'Linket er ufuldstændigt eller blev klippet over af e-mailprogrammet.',
+  'manage.err.calendarUnavailable': 'Vi kan ikke tjekke værtens kalender lige nu, så bookingen blev ikke flyttet. Prøv igen senere, eller kontakt værten.',
   'manage.err.invalid': 'Linket er ugyldigt eller udløbet.',
+  'manage.err.wrongAction': 'Det link kan ikke bruges til det.',
   'manage.linkError.pageTitle': 'Ugyldigt link',
   'manage.linkError.title': 'Linket er ugyldigt',
   'manage.linkError.hint':

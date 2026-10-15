@@ -51,7 +51,7 @@ import { DIGEST_HOURS } from '../../core/domain/digest.js'
 import type { ZoneTraffic } from '../../adapters/insights/zone-analytics.js'
 import { slotStateClassName } from '../../core/slot-state.js'
 import { slugify } from '../../core/domain/booking-service.js'
-import { formatInZone, localDateString, offsetLabel } from '../../core/time/zone.js'
+import { formatInZone, offsetLabel } from '../../core/time/zone.js'
 import type { ResolvedHost } from '../../core/domain/hosts.js'
 import { avatarHtml, escapeHtml, hostsSentence, joinNames, logoHtml, shellFoot, shellHead } from './booking.js'
 
@@ -2449,188 +2449,11 @@ export function settingsPage(d: SettingsPageData): string {
 }
 
 // ---------------------------------------------------------------------------
-// Guest manage page
+// Guest manage page: moved to ./manage.ts (guest-facing, localized, SwayQ skin).
+// Re-exported so existing importers keep working.
 // ---------------------------------------------------------------------------
 
-export interface BookingDetailPageData {
-  brandName: string
-  booking: Booking
-  /** Null when the event type has since been deleted; the booking still stands. */
-  eventType: EventType | null
-  host: User
-  /**
-   * The signed manage token from the query string. It is the credential
-   * (ADR-0005 §4) and travels back on every form, which is also why these
-   * forms carry no CSRF token: there is no session and no ambient authority to
-   * forge, exactly as on the public booking page (ADR-0005 §5).
-   */
-  token: string
-  /** What this token is allowed to do. A cancel link cannot reschedule. */
-  /**
-   * The token's real purpose. `manage` authorises BOTH actions and is the only
-   * purpose the coordinator mints, so narrowing this type is what previously
-   * hid the cancel form from every guest.
-   */
-  purpose: 'manage' | 'cancel' | 'reschedule'
-  /** Times offered for a reschedule, when the guest picked a day. */
-  slots?: Slot[]
-  selectedDate?: string
-  /** Set once the guest chose a time, so the page can ask for confirmation. */
-  newStart?: number
-  error?: string
-}
-
-export function bookingDetailPage(d: BookingDetailPageData): string {
-  const tz = d.booking.guestTimezone
-  const when = formatInZone(d.booking.startUtc, tz, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-  const title = d.eventType?.title ?? 'Your booking'
-  const cancelled = d.booking.status !== 'confirmed'
-  const tokenField = `<input type="hidden" name="token" value="${escapeHtml(d.token)}">`
-
-  return (
-    shellHead({ title: `${title} · ${d.brandName}`, brandName: d.brandName }) +
-    `<section class="pu-card" aria-label="Your booking">
-  <p><span class="pu-badge"${cancelled ? ' style="background:var(--pu-paper-dim);color:var(--pu-ink-500)"' : ''}>${escapeHtml(statusLabel(d.booking))}</span></p>
-  <h1>${escapeHtml(title)}</h1>
-  <p>with ${escapeHtml(d.host.name || d.host.slug)}</p>
-  <p class="pu-time"><strong>${escapeHtml(when)}</strong><br>
-    <span class="pu-muted">${escapeHtml(tz)} (${escapeHtml(offsetLabel(d.booking.startUtc, tz))}) · ${
-      Math.round((d.booking.endUtc - d.booking.startUtc) / 60000)
-    } min</span></p>
-  ${d.eventType ? `<p class="pu-muted">${escapeHtml(locationLabel(d.eventType))}</p>` : ''}
-  ${d.error ? `<p class="pu-err" role="alert">${escapeHtml(d.error)}</p>` : ''}
-</section>` +
-    (cancelled
-      ? `<section class="pu-card" style="margin-top:1.5rem">
-  <p class="pu-muted">This booking is no longer active, so there is nothing left to change.</p>
-</section>`
-      : rescheduleSection(d, tokenField) + cancelSection(d, tokenField)) +
-    shellFoot()
-  )
-}
-
-function statusLabel(b: Booking): string {
-  switch (b.status) {
-    case 'cancelled':
-      return 'Cancelled'
-    case 'rescheduled':
-      return 'Moved'
-    default:
-      return 'Confirmed'
-  }
-}
-
-function rescheduleSection(d: BookingDetailPageData, tokenField: string): string {
-  // Same as cancelSection: 'manage' authorises this too.
-  if (d.purpose !== 'reschedule' && d.purpose !== 'manage') {
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Reschedule">
-  <h2>Need a different time?</h2>
-  <p class="pu-muted">Use the reschedule link in your confirmation email — this one only cancels.</p>
-</section>`
-  }
-
-  const path = d.eventType
-    ? `/booking/${encodeURIComponent(d.booking.id)}?token=${encodeURIComponent(d.token)}`
-    : null
-  if (!path) {
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Reschedule">
-  <h2>Reschedule</h2>
-  <p class="pu-muted">This event type is no longer offered, so it cannot be rescheduled. Cancel and book again.</p>
-</section>`
-  }
-
-  if (d.newStart !== undefined) {
-    const when = formatInZone(d.newStart, d.booking.guestTimezone, {
-      weekday: 'long',
-      month: 'long',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    })
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Confirm new time">
-  <h2>Move to this time?</h2>
-  <p class="pu-time"><strong>${escapeHtml(when)}</strong><br>
-    <span class="pu-muted">${escapeHtml(d.booking.guestTimezone)}</span></p>
-  <form method="post" action="/booking/${encodeURIComponent(d.booking.id)}/reschedule">
-    ${tokenField}
-    <input type="hidden" name="start" value="${d.newStart}">
-    <div style="display:flex;gap:.75rem;flex-wrap:wrap">
-      <button class="pu-btn" type="submit">Confirm new time</button>
-      <a class="pu-btn pu-btn-ghost" href="${escapeHtml(path)}">Back</a>
-    </div>
-  </form>
-</section>`
-  }
-
-  const date = d.selectedDate ?? localDateString(d.booking.startUtc, d.booking.guestTimezone)
-  const slots = d.slots ?? []
-  const list =
-    slots.length === 0
-      ? '<p class="pu-muted">No times available on this day.</p>'
-      : `<div class="pu-slots">
-    ${slots
-      .map((s) => {
-        const label = formatInZone(s.start, d.booking.guestTimezone, { hour: 'numeric', minute: '2-digit' })
-        const href = `${path}&date=${encodeURIComponent(date)}&start=${s.start}`
-        return `<a class="${slotStateClassName('available')}" href="${escapeHtml(href)}">
-      <time datetime="${new Date(s.start).toISOString()}">${escapeHtml(label)}</time></a>`
-      })
-      .join('\n    ')}
-  </div>`
-
-  return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Reschedule">
-  <h2>Pick a new time</h2>
-  <form method="get" action="/booking/${encodeURIComponent(d.booking.id)}">
-    <input type="hidden" name="token" value="${escapeHtml(d.token)}">
-    <label for="date">Day</label>
-    <input id="date" name="date" type="date" value="${escapeHtml(date)}">
-    <div style="margin-top:.75rem"><button class="pu-btn pu-btn-ghost" type="submit">Show times</button></div>
-  </form>
-  <p class="pu-muted" style="font-size:.8125rem;margin-top:1rem">
-    Times in ${escapeHtml(d.booking.guestTimezone)}</p>
-  ${list}
-</section>`
-}
-
-function cancelSection(d: BookingDetailPageData, tokenField: string): string {
-  // A 'manage' token authorises both actions, and it is the ONLY purpose the
-  // coordinator mints. Refusing anything that is not literally 'cancel' left
-  // every real guest looking at "use the cancel link in your email" — while
-  // that email's cancel link is this same URL. The loop never terminated.
-  if (d.purpose !== 'cancel' && d.purpose !== 'manage') {
-    return `<section class="pu-card" style="margin-top:1.5rem" aria-label="Cancel">
-  <h2>Need to cancel?</h2>
-  <p class="pu-muted">Use the cancel link in your confirmation email — this one only reschedules.</p>
-</section>`
-  }
-  return `<form class="pu-card" method="post" style="margin-top:1.5rem"
-      action="/booking/${encodeURIComponent(d.booking.id)}/cancel">
-  ${tokenField}
-  <h2>Cancel this booking</h2>
-  <p class="pu-muted">The host is notified and the time is released for someone else.</p>
-  <button class="pu-btn pu-btn-danger" type="submit">Cancel booking</button>
-</form>`
-}
-
-/** Shared "this link is not valid" page. Says nothing about why. */
-export function manageLinkErrorPage(brandName: string, message: string): string {
-  return (
-    shellHead({ title: `Link not valid · ${brandName}`, brandName }) +
-    `<section class="pu-card">
-  <h1>This link is not valid</h1>
-  <p class="pu-muted">${escapeHtml(message)}</p>
-  <p class="pu-muted">Links expire, and rescheduling replaces the ones sent before it. The most recent
-     confirmation email always has a working link.</p>
-</section>` +
-    shellFoot()
-  )
-}
+export { bookingDetailPage, manageLinkErrorPage, type BookingDetailPageData } from './manage.js'
 
 // ---------------------------------------------------------------------------
 // Host bookings — the list, one booking, and the host's reschedule picker
@@ -2714,6 +2537,17 @@ function bookingListRow(row: BookingListRow, tz: string): string {
         ${statusBadge(b)}
       </a>
     </li>`
+}
+
+function statusLabel(b: Booking): string {
+  switch (b.status) {
+    case 'cancelled':
+      return 'Cancelled'
+    case 'rescheduled':
+      return 'Moved'
+    default:
+      return 'Confirmed'
+  }
 }
 
 /** Confirmed is the green dot; cancelled the danger ring; moved is neutral — the replacement carries the green. */

@@ -908,6 +908,12 @@ export interface BookingAttempt {
   guestName: string
   guestEmail: string
   guestTimezone: string
+  /**
+   * The language the guest booked in (`en` | `da`), from the confirm form.
+   * Optional: persisted by the unit that adds `bookings.guest_locale`, and
+   * used for the guest's emails and manage pages.
+   */
+  guestLocale?: string
   answers: Record<string, string>
   idempotencyKey?: string
   holdId?: string

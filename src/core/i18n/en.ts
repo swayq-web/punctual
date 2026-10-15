@@ -82,7 +82,7 @@ export const en = {
   'taken.cta': 'See available times',
   'calendarUnavailable.title': 'Booking is temporarily unavailable',
   'calendarUnavailable.body':
-    'We cannot reach the host calendar right now, so we cannot show reliable times. Please try again in a few minutes.',
+    'We cannot check the host calendar right now, so no times are shown and nothing has been booked. Please try again later or contact the host.',
 
   // --- confirmation -------------------------------------------------------
   'booked.pageTitle': 'Booked',
@@ -133,7 +133,9 @@ export const en = {
   'manage.err.noTime': 'No new time was chosen.',
   'manage.err.cannotMove': 'This booking can no longer be moved.',
   'manage.err.incomplete': 'The link is incomplete or was cut short by an email client.',
+  'manage.err.calendarUnavailable': 'We cannot check the host calendar right now, so the booking was not moved. Please try again later or contact the host.',
   'manage.err.invalid': 'This link is not valid or has expired.',
+  'manage.err.wrongAction': 'This link cannot do that.',
   'manage.linkError.pageTitle': 'Link not valid',
   'manage.linkError.title': 'This link is not valid',
   'manage.linkError.hint':

@@ -33,6 +33,7 @@ import type { EventType, User } from '../core/domain/types.js'
 import { hostUsers as hostUsers_, resolveHosts as resolveEventTypeHosts } from '../core/domain/hosts.js'
 import { isValidTimeZone, localDateString } from '../core/time/zone.js'
 import {
+  calendarUnavailablePage,
   bookedConfirmation,
   confirmForm,
   displayCompany,
@@ -47,6 +48,29 @@ import {
   hostsRow,
   joinNames,
 } from './pages/booking.js'
+import { manageHeaders } from './pages/manage.js'
+import {
+  langCookieHeader,
+  resolveLocale,
+  t,
+  type Locale,
+  type MessageKey,
+} from '../core/i18n/index.js'
+import { SWAYQ_SURFACES, blockedByForm, blockedSurface } from '../swayq-surfaces.js'
+import {
+  COLLEAGUES_ANSWER_KEY,
+  GUEST_EMAIL_DAILY_LIMIT,
+  GUEST_EMAIL_WINDOW_SECONDS,
+  guestLimitKey,
+  parseColleagues,
+} from '../core/domain/guest-history.js'
+import {
+  TURNSTILE_FORM_FIELD,
+  TURNSTILE_SCRIPT_URL,
+  turnstileConfig,
+  turnstileWidgetKey,
+  verifyTurnstile,
+} from './turnstile.js'
 
 type Env = Record<string, unknown>
 
@@ -84,6 +108,20 @@ function recordView(ports: EnginePorts, request: Request, kind: InsightKind, eve
 export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>()
   const publicScope: RequestScope = { consistency: 'unconstrained' }
+
+  // SwayQ surface switches (src/swayq-surfaces.ts): an unmounted upstream
+  // surface answers like any unknown URL. One middleware, first in line, so
+  // no route below can be reached around it. `/mcp` is simply not mounted.
+  app.use('*', async (c, next) => {
+    const path = new URL(c.req.url).pathname
+    if (blockedSurface(path)) return notFound(c, ports)
+    if (c.req.method === 'POST' && /\/notifications$/.test(path)) {
+      // Channel creation shares one URL across kinds; read the kind from a clone so the real handler still gets an unread body.
+      const form = await c.req.raw.clone().formData().catch(() => null)
+      if (form && blockedByForm(path, form)) return notFound(c, ports)
+    }
+    await next()
+  })
 
   // `ok` stays a pure liveness signal — a deployment deliberately running
   // without an email provider (local dev, a first boot) is UP, and flipping
@@ -205,7 +243,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
   // so a host cannot claim the slug "api" and shadow them.
   app.route('/api/v1', buildApiRoutes(ports, slots))
   // The MCP sub-app registers its handlers at '/', so it mounts at '/mcp'.
-  app.route('/mcp', buildMcpRoutes(ports, slots))
+  if (SWAYQ_SURFACES.mcp) app.route('/mcp', buildMcpRoutes(ports, slots))
   app.route('/', buildEmbedRoutes(ports))
 
   // Dashboard, auth and guest-manage routes. Mount order is load-bearing:
@@ -320,6 +358,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
 
     const guestTimezone = resolveGuestTimezone(c.req.query('tz'), c.req.raw, host.tz)
     const embed = c.req.query('embed') === '1'
+    const lang = langOf(c)
     recordView(ports, c.req.raw, 'page_view', eventType, embed)
     const currentMonth = localDateString(ports.clock.now(), host.tz).slice(0, 7)
     // The floor `clampMonth` snaps back to, below: the EARLIER of
@@ -394,6 +433,8 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       guestTimezone,
       baseUrl: ports.config.baseUrl,
       embed,
+      locale: lang.locale,
+      langExplicit: lang.explicit,
     }
 
     const head =
@@ -401,6 +442,10 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
         title: `${eventType.title} · ${team ? (team.showName === false ? ports.config.brandName : team.name) : host.name || host.slug}`,
         description: eventType.description || undefined,
         brandName: ports.config.brandName,
+        guest: true,
+        locale: lang.locale,
+        embed,
+        langHref: langHrefFor(c),
         // The one link that's actually meant to be shared — a host posts it
         // in an email signature or a chat app, so it's the one page in the
         // whole engine worth unfurling. /og/:userSlug/:eventSlug.png
@@ -458,11 +503,13 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       // A host's calendar could not be read and no other host has a free
       // time, so "no times available" would be a lie. Say what happened.
       if (monthSlots.length === 0 && calendarUnavailable.size > 0) {
-        return `${hostsRow(data)}${calendarUnavailableNotice()}`
+        return `${hostsRow(data)}${calendarUnavailablePage(lang.locale)}`
       }
 
       return `${hostsRow(data)}<div class="pu-grid">${monthGrid(data)}${slotList(data)}</div>`
-    }, shellFoot(true, embed, displayCompany(headerData)))
+    }, shellFoot(true, embed, displayCompany(headerData), { locale: lang.locale, brandName: ports.config.brandName }), {
+      headers: guestHeaders(lang, c),
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -482,7 +529,9 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
     if (!Number.isSafeInteger(start) || Math.abs(start) > 8.64e15) return notFound(c, ports)
     const guestTimezone = resolveGuestTimezone(c.req.query('tz'), c.req.raw, host.tz)
     const embed = c.req.query('embed') === '1'
+    const lang = langOf(c)
     recordView(ports, c.req.raw, 'confirm_view', eventType, embed)
+    const siteKey = turnstileWidgetKey(turnstileConfig(c.env))
 
     const data: BookingPageData = {
       host,
@@ -498,15 +547,18 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       baseUrl: ports.config.baseUrl,
       embed,
       confirmStart: start,
+      locale: lang.locale,
+      langExplicit: lang.explicit,
+      ...(siteKey ? { turnstileSiteKey: siteKey } : {}),
     }
 
     const html =
-      shellHead({ title: `Confirm · ${eventType.title}`, brandName: ports.config.brandName }) +
+      confirmHead(ports, data, lang, c, siteKey) +
       eventHeader(data) +
       hostsRow(data) +
       confirmForm(data, start) +
-      shellFoot(true, embed, displayCompany(data))
-    return c.html(html)
+      shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName })
+    return c.html(html, 200, guestHeaders(lang, c))
   })
 
   // -------------------------------------------------------------------------
@@ -519,12 +571,13 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
     // Abuse limit, not a plan quota (ADR-0006 §3).
     const limit = await ports.rateLimiter.check('booking:ip', ip, 10, 3600)
     if (!limit.allowed) {
+      const lang = langOf(c)
       return c.html(
-        shellHead({ title: 'Too many requests', brandName: ports.config.brandName }) +
-          errorPage('Too many bookings', 'Please wait a little and try again.') +
-          shellFoot(),
+        guestPageHead(ports, lang, t(lang.locale, 'err.tooManyRequests.title')) +
+          errorPage(t(lang.locale, 'err.tooManyBookings.title'), t(lang.locale, 'err.waitAndRetry')) +
+          guestFoot(ports, lang),
         429,
-        { 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
+        { ...guestHeaders(lang), 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
       )
     }
 
@@ -535,6 +588,9 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
     const { host, eventType, team, companyLogo } = ctx
 
     const form = await c.req.formData()
+    // The form carries the language the guest was looking at (hidden `lang`):
+    // a POST has no ?lang= of its own, and a third-party iframe has no cookie.
+    const lang = langOf(c, String(form.get('lang') ?? ''))
     const start = Number(form.get('start'))
     // Finite is not enough: 1e20 passes and then throws inside Intl, which
     // surfaces as a bare 500. 8.64e15 is the JS Date range.
@@ -566,34 +622,91 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       baseUrl: ports.config.baseUrl,
       embed,
       confirmStart: start,
+      locale: lang.locale,
+      langExplicit: lang.explicit,
     }
+    const tsConfig = turnstileConfig(c.env)
+    if (turnstileWidgetKey(tsConfig)) data.turnstileSiteKey = turnstileWidgetKey(tsConfig)!
 
     const { validateAnswers, isValidEmail, pickDeclaredAnswers } = await import(
       '../core/domain/booking-service.js'
     )
     const declared = pickDeclaredAnswers(eventType, answers)
-    const errors = validateAnswers(eventType, declared)
-    if (name === '') errors['name'] = 'Please tell us your name'
+    const errors = localizeAnswerErrors(lang.locale, validateAnswers(eventType, declared))
+    if (name === '') errors['name'] = t(lang.locale, 'err.name')
     // REST and MCP both cap this at 200; the public form did not. An oversized
     // name pushes the queued email past Cloudflare's 128 KB message limit, and
     // BOTH confirmations are lost while the slot stays booked.
-    else if (name.length > 200) errors['name'] = 'Please use 200 characters or fewer'
-    if (!isValidEmail(email)) errors['email'] = 'Please enter a valid email address'
+    else if (name.length > 200) errors['name'] = t(lang.locale, 'err.nameLong')
+    if (!isValidEmail(email)) errors['email'] = t(lang.locale, 'err.email')
+
+    // Optional extra attendees. The domain model has no attendee list yet, so
+    // they are validated here and travel as the `colleagues` declared answer
+    // (comma separated, lower-cased, de-duplicated); see the PR's integration flags.
+    const colleaguesRaw = String(form.get('colleagues') ?? '')
+    const colleagues = parseColleagues(colleaguesRaw, email)
+    if (!colleagues.ok) {
+      errors['x_colleagues'] =
+        colleagues.error === 'too_many'
+          ? t(lang.locale, 'err.colleaguesMax')
+          : t(lang.locale, 'err.colleagueInvalid', { email: colleagues.email })
+    }
+
+    // Verified only once the form is otherwise valid: a typo should not cost a siteverify call, and the
+    // challenge is single use, so a re-rendered form brings a fresh widget.
+    if (Object.keys(errors).length === 0) {
+      const human = await verifyTurnstile(
+        tsConfig,
+        String(form.get(TURNSTILE_FORM_FIELD) ?? ''),
+        c.req.header('cf-connecting-ip'),
+      )
+      if (!human.ok) errors['captcha'] = t(lang.locale, 'err.captcha')
+    }
 
     if (Object.keys(errors).length > 0) {
       return c.html(
-        shellHead({ title: `Confirm · ${eventType.title}`, brandName: ports.config.brandName }) +
+        confirmHead(ports, data, lang, c, data.turnstileSiteKey, false) +
           eventHeader(data) +
           // `declared` (not raw `answers`): a stale-form submission that
           // posted under the built-in q_agenda key while the event type's
           // effective question has a different id needs to reappear under
           // THAT id, or confirmForm's `values[q.id]` lookup renders it as
           // empty and the guest's typed text looks lost on the error page.
-          confirmForm(data, start, { errors, values: { name, email, ...declared }, holdId }) +
-          shellFoot(true, embed, displayCompany(data)),
+          confirmForm(data, start, {
+            errors,
+            values: { name, email, ...declared, x_colleagues: colleaguesRaw },
+            holdId,
+          }) +
+          shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
         400,
+        guestHeaders(lang),
       )
     }
+
+    // At most GUEST_EMAIL_DAILY_LIMIT attempts per guest email per host per
+    // day. The limiter is a token bucket (ADR-0006 §3) that fails open if the
+    // DO is unreachable; like the per-IP limit it is an abuse limit, not a quota.
+    const perGuest = await ports.rateLimiter.check(
+      'booking:guest-host',
+      guestLimitKey(host.id, email),
+      GUEST_EMAIL_DAILY_LIMIT,
+      GUEST_EMAIL_WINDOW_SECONDS,
+    )
+    if (!perGuest.allowed) {
+      return c.html(
+        guestPageHead(ports, lang, t(lang.locale, 'err.guestLimit.title')) +
+          eventHeader(data) +
+          errorPage(t(lang.locale, 'err.guestLimit.title'), t(lang.locale, 'err.guestLimit.body')) +
+          shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
+        429,
+        {
+          ...guestHeaders(lang),
+          'retry-after': String(Math.ceil((perGuest.resetAt - ports.clock.now()) / 1000)),
+        },
+      )
+    }
+
+    if (colleagues.ok && colleagues.emails.length > 0) declared[COLLEAGUES_ANSWER_KEY] = colleagues.emails.join(', ')
 
     const hostUsers = data.hosts ? hostUsers_(data.hosts) : [host]
     const outcome = await ports.coordinator.book(host.id, {
@@ -604,6 +717,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       guestName: name,
       guestEmail: email,
       guestTimezone,
+      guestLocale: lang.locale,
       answers: declared,
       holdId,
       idempotencyKey: c.req.header('idempotency-key') ?? undefined,
@@ -614,10 +728,10 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       // Refused because a host's calendar could not be read, never committed
       // blind. Retryable, so 503 and a page that says so; nothing was booked.
       return c.html(
-        shellHead({ title: 'Temporarily unavailable', brandName: ports.config.brandName }) +
+        guestPageHead(ports, lang, t(lang.locale, 'calendarUnavailable.title'), embed) +
           eventHeader(data) +
-          calendarUnavailableNotice() +
-          shellFoot(true, embed, displayCompany(data)),
+          calendarUnavailablePage(lang.locale) +
+          shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
         503,
         { 'retry-after': '30' },
       )
@@ -629,13 +743,17 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       const body =
         outcome.reason === 'slot_taken' || outcome.reason === 'outside_availability'
           ? slotTakenPage(data, localDateString(start, guestTimezone))
-          : errorPage('Could not complete booking', outcome.detail ?? 'Please try another time.')
+          : errorPage(
+              t(lang.locale, 'err.couldNotBook.title'),
+              outcome.detail ?? t(lang.locale, 'err.couldNotBook.body'),
+            )
       return c.html(
-        shellHead({ title: 'Time unavailable', brandName: ports.config.brandName }) +
+        guestPageHead(ports, lang, t(lang.locale, 'taken.pageTitle'), embed) +
           eventHeader(data) +
           body +
-          shellFoot(true, embed, displayCompany(data)),
+          shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
         409,
+        guestHeaders(lang),
       )
     }
 
@@ -644,8 +762,17 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
     const manageUrl =
       `${ports.config.baseUrl}/booking/${outcome.booking.id}` +
       (outcome.manageToken ? `?token=${encodeURIComponent(outcome.manageToken)}` : '')
+    // This page links to the manage URL, which holds a credential: it is
+    // never cached, never indexed, and sends no referrer.
     return c.html(
-      shellHead({ title: 'Booked', brandName: ports.config.brandName }) +
+      shellHead({
+        title: t(lang.locale, 'booked.pageTitle'),
+        brandName: ports.config.brandName,
+        guest: true,
+        locale: lang.locale,
+        embed,
+        sensitive: true,
+      }) +
         bookedConfirmation({
           eventTitle: eventType.title,
           // Who actually attends — the round-robin pick, or the required
@@ -656,12 +783,16 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
               .map((id) => hostUsers.find((u) => u.id === id))
               .filter((u): u is User => u !== undefined)
               .map((u) => u.name || u.slug),
+            t(lang.locale, 'hosts.and'),
           ) || host.name || host.slug,
           start: outcome.booking.startUtc,
           guestTimezone,
           manageUrl,
+          locale: lang.locale,
         }) +
-        shellFoot(true, embed, displayCompany(data)),
+        shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
+      200,
+      { ...manageHeaders(), ...guestHeaders(lang) },
     )
   })
 
@@ -672,18 +803,6 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
 
 // ---------------------------------------------------------------------------
 
-
-/**
- * Shown when a host's calendar could not be read (SWA-1285). Plain English
- * on purpose: the i18n integrator swaps this copy for the
- * `calendarUnavailable` key.
- */
-function calendarUnavailableNotice(): string {
-  return errorPage(
-    'Temporarily unavailable',
-    "We can't check this host's calendar right now, so no times are shown and nothing has been booked. Please try again later or contact the host.",
-  )
-}
 
 /**
  * The guest's timezone.
@@ -730,13 +849,106 @@ function validDate(v: string | undefined): string | undefined {
   return v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined
 }
 
+// ---------------------------------------------------------------------------
+// Guest language and chrome
+// ---------------------------------------------------------------------------
+
+interface GuestLang {
+  locale: Locale
+  /** `?lang=` (or the form's hidden `lang`) named it: write the cookie, carry it on links. */
+  explicit: boolean
+}
+
+type GuestCtx = Context<{ Bindings: Env }>
+
+/** `?lang=` (or `formLang`) > cookie > Accept-Language > English. */
+function langOf(c: GuestCtx, formLang?: string): GuestLang {
+  let query: string | null = formLang && formLang !== '' ? formLang : null
+  if (query === null) {
+    try {
+      query = new URL(c.req.url).searchParams.get('lang')
+    } catch {
+      query = null
+    }
+  }
+  return resolveLocale({
+    query,
+    cookie: c.req.header('cookie') ?? null,
+    acceptLanguage: c.req.header('accept-language') ?? null,
+  })
+}
+
+/** Headers every guest response carries: the cache varies on language, and an explicit choice is remembered. */
+function guestHeaders(lang: GuestLang, c?: GuestCtx): Record<string, string> {
+  const secure = c ? new URL(c.req.url).protocol === 'https:' : true
+  return {
+    vary: 'Accept-Language, Cookie',
+    ...(lang.explicit ? { 'set-cookie': langCookieHeader(lang.locale, secure) } : {}),
+  }
+}
+
+/** The toggle's link for the other language: this very URL with `lang` replaced. */
+function langHrefFor(c: GuestCtx): (l: Locale) => string {
+  return (l) => {
+    const u = new URL(c.req.url)
+    u.searchParams.set('lang', l)
+    return `${u.pathname}${u.search}`
+  }
+}
+
+function guestPageHead(ports: EnginePorts, lang: GuestLang, title: string, embed = false): string {
+  return shellHead({ title, brandName: ports.config.brandName, guest: true, locale: lang.locale, embed })
+}
+
+function guestFoot(ports: EnginePorts, lang: GuestLang): string {
+  return shellFoot(true, false, null, { locale: lang.locale, brandName: ports.config.brandName })
+}
+
+/** The confirm page head: the Turnstile script is named here and nowhere else, and only when a site key is set. */
+function confirmHead(
+  ports: EnginePorts,
+  data: BookingPageData,
+  lang: GuestLang,
+  c: GuestCtx,
+  siteKey: string | undefined,
+  withToggle = true,
+): string {
+  return shellHead({
+    title: t(lang.locale, 'confirm.pageTitle', { event: data.eventType.title }),
+    brandName: ports.config.brandName,
+    guest: true,
+    locale: lang.locale,
+    embed: data.embed === true,
+    ...(withToggle ? { langHref: langHrefFor(c) } : {}),
+    ...(siteKey ? { headExtra: `<script src="${TURNSTILE_SCRIPT_URL}" async defer></script>` } : {}),
+  })
+}
+
+const ANSWER_ERROR_KEYS: Record<string, MessageKey> = {
+  'This field is required': 'err.required',
+  'Not one of the available options': 'err.option',
+  'Too long (max 2000 characters)': 'err.tooLong',
+}
+
+/** `validateAnswers` (core) speaks English; map its fixed messages onto the dictionary. */
+function localizeAnswerErrors(locale: Locale, errors: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, msg] of Object.entries(errors)) {
+    const key = ANSWER_ERROR_KEYS[msg]
+    out[k] = key ? t(locale, key) : msg
+  }
+  return out
+}
+
 /** Hono's `c.html` can return a promise, so the helper mirrors that. */
 function notFound(c: Context<{ Bindings: Env }>, ports: EnginePorts): Response | Promise<Response> {
+  const lang = langOf(c)
   return c.html(
-    shellHead({ title: 'Not found', brandName: ports.config.brandName }) +
-      errorPage('Not found', 'That booking page does not exist.') +
-      shellFoot(),
+    shellHead({ title: t(lang.locale, 'err.notFound.title'), brandName: ports.config.brandName, guest: true, locale: lang.locale }) +
+      errorPage(t(lang.locale, 'err.notFound.title'), t(lang.locale, 'err.notFound.body')) +
+      shellFoot(true, false, null, { locale: lang.locale, brandName: ports.config.brandName }),
     404,
+    guestHeaders(lang),
   )
 }
 
@@ -768,12 +980,18 @@ async function bookingPageRateLimited(
   const ip = c.req.header('cf-connecting-ip') ?? 'unknown'
   const limit = await ports.rateLimiter.check('booking_page:ip', ip, 120, 60)
   if (limit.allowed) return undefined
+  const lang = langOf(c)
   return c.html(
-    shellHead({ title: 'Too many requests', brandName: ports.config.brandName }) +
-      errorPage('Too many requests', 'Please wait a little and try again.') +
-      shellFoot(),
+    shellHead({
+      title: t(lang.locale, 'err.tooManyRequests.title'),
+      brandName: ports.config.brandName,
+      guest: true,
+      locale: lang.locale,
+    }) +
+      errorPage(t(lang.locale, 'err.tooManyRequests.title'), t(lang.locale, 'err.waitAndRetry')) +
+      shellFoot(true, false, null, { locale: lang.locale, brandName: ports.config.brandName }),
     429,
-    { 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
+    { ...guestHeaders(lang), 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
   )
 }
 
