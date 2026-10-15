@@ -103,3 +103,39 @@ export function blockedByForm(
   }
   return null
 }
+
+/** The media type of a Content-Type header: lower-cased, parameters dropped. */
+export function mediaType(contentType: string | null | undefined): string {
+  return (contentType ?? '').split(';')[0]!.trim().toLowerCase()
+}
+
+/** True only for `application/json` and `+json` structured types, decided on the media type alone. */
+export function isJsonMediaType(type: string): boolean {
+  return type === 'application/json' || type.endsWith('+json')
+}
+
+/**
+ * Parse a request body for `blockedByForm`. The body is read the way the
+ * handler behind the path will read it, never by a substring of the header (a
+ * parameter such as `; x=json` must not steer the choice):
+ *  - the REST API ignores Content-Type and parses the text as JSON, so the
+ *    API paths are always JSON here (an empty body is `{}`, as it is there);
+ *  - dashboard forms are JSON only when the parsed media type says so, else
+ *    urlencoded or multipart.
+ * Returns null when the body cannot be parsed; the router treats that as
+ * blocked, because a gate that lets an unreadable body through is bypassed
+ * by sending one.
+ */
+export async function readSurfaceBody(raw: Request, pathname: string): Promise<{ get(name: string): unknown } | null> {
+  const asJson = API_EVENT_TYPE_WRITE.test(pathname) || isJsonMediaType(mediaType(raw.headers.get('content-type')))
+  try {
+    if (asJson) {
+      const text = await raw.text()
+      const j = (text.trim() === '' ? {} : JSON.parse(text)) as unknown
+      return { get: (k: string) => (j as Record<string, unknown> | null)?.[k] }
+    }
+    return await raw.formData()
+  } catch {
+    return null
+  }
+}

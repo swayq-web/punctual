@@ -29,16 +29,31 @@ Never open a PR against CCCrafts/punctual from here.
 ## SwayQ-modified upstream files
 
 Against the pin `76dddfd` (`git diff --stat 76dddfd origin/main`, 2026-10-16).
-The integrator appends later units.
+Resolve conflicts here first when merging upstream. Files marked (new) do not
+exist upstream.
 
-- Docs/migrations: `docs/internal-api.md`, `migrations/0018_calendar_sync_state.sql`
-- Adapters: `src/adapters/{calendar-sync-alerts,calendar-sync-errors,calendar-sync-redrive,coordinator,providers,scheduled}.ts`, `src/adapters/d1/{repositories,schema}.ts`, `src/adapters/google/{get-event,internal-meetings,provider}.ts`, `src/adapters/microsoft/{get-event,provider}.ts`, `src/adapters/queue/consumer.ts`
-- Core: `src/core/domain/{booking-service,calendar-sync,types}.ts`, `src/engine.ts`, `src/ports.ts`, `src/testing/fakes.ts`
-- HTTP: `src/http/{router,calendar-connect,dashboard-routes}.ts`, `src/http/api/rest.ts`, `src/http/mcp/server.ts`, `src/index.ts`
-- Internal API (new): `src/internal/{contract,entrypoint,schemas,service,token}.ts`
-- Tests: `test/core/{calendar-parsing,calendar-sync-dispatch,calendar-sync-durability,internal-api}.test.ts`, `test/workers/{calendar-fail-closed,calendar-sync-state,internal-entrypoint,no-avatars-binding}.test.ts`, `test/workers/env.d.ts`
-- Template/ignore: `wrangler.toml` (DLQ consumer block), `.gitignore` (tracks the two SwayQ configs)
+- i18n (new): `src/core/i18n/{index,en,da}.ts`; wired through `src/http/pages/*`, `src/core/email-templates.ts`, `src/http/router.ts`
+- Pages and skin: `src/http/pages/{booking,dashboard}.ts`, `src/http/pages/manage.ts` (new), `src/http/swayq-skin.ts` (new), `src/http/streaming.ts`, `src/http/turnstile.ts` (new), `src/http/router.ts`, `src/swayq-surfaces.ts` (new, surface switches), `assets/fonts/*` (Poppins, OFL)
+- Email and notifications: `src/core/email-templates.ts`, `src/core/ics.ts`, `src/core/domain/guest-history.ts` (new), `src/adapters/notify.ts`
+- Calendar sync (durable, fail-closed): `migrations/0018_calendar_sync_state.sql`, `src/adapters/{calendar-sync-alerts,calendar-sync-errors,calendar-sync-redrive,coordinator,providers,scheduled}.ts`, `src/adapters/d1/{repositories,schema}.ts`, `src/adapters/google/{get-event,internal-meetings,provider}.ts`, `src/adapters/microsoft/{get-event,provider}.ts`, `src/adapters/queue/consumer.ts`, `src/core/domain/{booking-service,calendar-sync,types}.ts`, `src/engine.ts`, `src/ports.ts`, `src/http/{calendar-connect,dashboard-routes}.ts`, `src/http/api/rest.ts`, `src/http/mcp/server.ts`, `src/index.ts`, `src/testing/fakes.ts`
+- Internal API (new, service binding to the swayq Worker): `src/internal/{contract,entrypoint,schemas,service,token}.ts`, `docs/internal-api.md`
+- Deploy and config: `wrangler.production.toml`, `wrangler.staging.toml` (new), `wrangler.toml` (DLQ consumer block), `.github/workflows/swayq-deploy.yml` (new), `.github/workflows/ci.yml` (token permissions), `.gitignore`, `docs/self-hosting.md`, `SWAYQ.md`
+- Hardening (SWA-1290): `src/log-redact.ts` (new, URL redaction), `app.onError` in `src/http/router.ts`, `readSurfaceBody` in `src/swayq-surfaces.ts`
 - Avatars: `src/adapters/storage/r2-blob.ts` (null storage when no AVATARS binding), `Env.AVATARS` now optional
+- Tests: `test/core/*` and `test/workers/*` for each area above; `test/workers/surface-body-gate.test.ts` and `test/core/log-redact.test.ts` cover the hardening
+
+## Production prerequisites
+
+Tick all of these before the first production deploy.
+
+- [ ] GitHub environments `staging` and `production` exist in swayq-web/punctual. Deployment branches restricted to `main`; `production` has a required reviewer. (The deploy workflow also refuses any ref but `refs/heads/main`.)
+- [ ] Environment secrets set in both: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ENCRYPTION_KEY_V1`, `SIGNING_KEY`, `RESEND_API_KEY`, `TURNSTILE_SECRET`, `INTERNAL_SERVICE_TOKEN`.
+- [ ] `REPLACE_WITH_` placeholders filled in both wrangler configs from `terraform output`.
+- [ ] `workers_dev = false` and `preview_urls = false` stay set in both configs, so the Worker answers only on its custom domain. After the first deploy confirm `https://swayq-booking.<subdomain>.workers.dev/health` does not answer.
+- [ ] Invocation logs are off (`[observability.logs] invocation_logs = false`): they print full request URLs and the magic/manage links carry tokens in the query.
+- [ ] Guest-data purge cron is live: `crons = ["*/5 * * * *"]` is deployed and the purge task appears in the scheduled run (check the Worker's cron triggers and one scheduled invocation in logs).
+- [ ] Turnstile: `TURNSTILE_REQUIRED = "true"` with a real site key and `TURNSTILE_SECRET`; a booking without a token is refused.
+- [ ] Booking Worker deployed before the swayq PR that binds `InternalApi`.
 
 ## Environments
 
@@ -80,10 +95,11 @@ encrypted with it).
   exported from `src/index.ts`; swayq binds it as a service binding). Unset
   token refuses every call.
 - `TURNSTILE_REQUIRED`, `TURNSTILE_SITE_KEY` (vars) and `TURNSTILE_SECRET`
-  (secret) are set but NOT yet read by the code on fork main; they take effect
-  when the Turnstile source change lands.
+  (secret) ARE read, by `src/http/turnstile.ts` (the guest booking form). With
+  `TURNSTILE_REQUIRED = "true"` a missing secret or site key fails closed.
 - Secrets read: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
-  `ENCRYPTION_KEY_V1`, `SIGNING_KEY`, `RESEND_API_KEY`, `INTERNAL_SERVICE_TOKEN`.
+  `ENCRYPTION_KEY_V1`, `SIGNING_KEY`, `RESEND_API_KEY`, `TURNSTILE_SECRET`,
+  `INTERNAL_SERVICE_TOKEN`.
 - Deliberately omitted: `DEMO_BOOKING_PATH`, `GA_MEASUREMENT_ID`,
   `ENCRYPTION_KEY_V2`, `EMAIL` (send_email binding; Resend is used),
   `INSIGHTS` / `INSIGHTS_DATASET` / `INSIGHTS_API_TOKEN` (no Analytics Engine),

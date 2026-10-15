@@ -12,6 +12,8 @@
  */
 
 import { Hono, type Context } from 'hono'
+import { HTTPException } from 'hono/http-exception'
+import { redactUrl, redactUrlsIn } from '../log-redact.js'
 import { streamPage } from './streaming.js'
 import { buildApiRoutes } from './api/rest.js'
 import { buildMcpRoutes } from './mcp/server.js'
@@ -56,7 +58,7 @@ import {
   type Locale,
   type MessageKey,
 } from '../core/i18n/index.js'
-import { SWAYQ_SURFACES, blockedByForm, blockedSurface, needsBodyCheck } from '../swayq-surfaces.js'
+import { SWAYQ_SURFACES, blockedByForm, blockedSurface, needsBodyCheck, readSurfaceBody } from '../swayq-surfaces.js'
 import {
   GUEST_EMAIL_DAILY_LIMIT,
   GUEST_EMAIL_WINDOW_MS,
@@ -126,11 +128,10 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       // Some switches live in the body (a Telegram channel, a team-owned
       // event type). Read a clone, so the real handler still gets an unread body.
       const raw = c.req.raw.clone()
-      const isJson = (raw.headers.get('content-type') ?? '').includes('json')
-      const body = isJson
-        ? await raw.json().then((j: unknown) => ({ get: (k: string) => (j as Record<string, unknown> | null)?.[k] })).catch(() => null)
-        : await raw.formData().catch(() => null)
-      if (body && blockedByForm(decoded, body)) return notFound(c, ports)
+      const body = await readSurfaceBody(raw, decoded)
+      // An unparseable body is refused like the switch itself: failing open
+      // here would let a crafted Content-Type walk past the gate.
+      if (!body || blockedByForm(decoded, body)) return notFound(c, ports)
     }
     await next()
   })
@@ -795,6 +796,16 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
   })
 
   app.notFound((c) => notFound(c, ports))
+
+  // Unhandled errors: the same 500 as Hono's default, but the log line carries
+  // the method and the path only. Request URLs hold magic-link and manage
+  // tokens in the query string, and an error message can quote one.
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) return err.getResponse()
+    const message = err instanceof Error ? redactUrlsIn(err.message) : 'non-Error thrown'
+    console.error(`[punctual] unhandled error on ${c.req.method} ${redactUrl(c.req.url)}: ${message}`)
+    return c.text('Internal Server Error', 500)
+  })
 
   return app
 }

@@ -3,6 +3,14 @@ name: SwayQ deploy
 # Manual deploy of the SwayQ booking Worker (SWA-1290, SWAYQ.md).
 # Secrets and the Cloudflare token live in the GitHub Environment of the same
 # name as the input. Nothing here runs on push.
+#
+# Two jobs on purpose. `verify` installs dependencies and runs the tests with
+# NO secrets and no environment: install scripts and test code never see a
+# credential. `deploy` holds the environment, and each secret is scoped to the
+# one step that needs it (wrangler migrations, wrangler deploy, secret bulk).
+# Both install with --ignore-scripts; wrangler, workerd and esbuild ship their
+# binaries as optional dependencies, so no postinstall is needed (verified:
+# typecheck, the full suite and both wrangler dry runs pass without scripts).
 
 on:
   workflow_dispatch:
@@ -21,23 +29,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  verify:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-    timeout-minutes: 20
-    env:
-      TARGET: ${{ inputs.environment }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 20
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       - name: Typecheck
         run: npm run typecheck
@@ -45,7 +50,9 @@ jobs:
       - name: Tests
         run: npx vitest run
 
-      - name: Refuse placeholders and missing credentials
+      - name: Refuse placeholders
+        env:
+          TARGET: ${{ inputs.environment }}
         run: |
           set -euo pipefail
           cfg="wrangler.${TARGET}.toml"
@@ -54,25 +61,56 @@ jobs:
             echo "::error::$cfg still contains REPLACE_WITH_ placeholders. Fill them from terraform output (SWAYQ.md)."
             exit 1
           fi
+
+  deploy:
+    needs: verify
+    # The environment's own branch rule should say main only; this is the
+    # second lock, so a dispatch from another ref cannot deploy.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+          cache: npm
+
+      # No secret is in scope for the install.
+      - run: npm ci --ignore-scripts
+
+      - name: Apply D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
           for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
             if [ -z "${!v:-}" ]; then
               echo "::error::Environment secret $v is not set for $TARGET"
               exit 1
             fi
           done
-
-      - name: Apply D1 migrations
-        run: |
-          set -euo pipefail
           db=$(sed -n 's/^database_name = "\(.*\)"/\1/p' "wrangler.${TARGET}.toml" | head -n1)
           test -n "$db"
           npx wrangler d1 migrations apply "$db" --remote -c "wrangler.${TARGET}.toml"
 
       - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy -c "wrangler.${TARGET}.toml"
 
       - name: Push secrets
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           ENCRYPTION_KEY_V1: ${{ secrets.ENCRYPTION_KEY_V1 }}

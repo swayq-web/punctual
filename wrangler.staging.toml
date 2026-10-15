@@ -13,11 +13,23 @@ compatibility_flags = ["nodejs_compat"]
 # Custom domain. Wrangler owns the route (ADR-0004); no DNS/route in Terraform.
 routes = [{ pattern = "book.sway-q.com", custom_domain = true }]
 
+# Served ONLY on the custom domain above: no <name>.<subdomain>.workers.dev
+# and no per-version preview URLs.
+workers_dev = false
+preview_urls = false
+
 [assets]
 directory = "./assets"
 
 [observability]
 enabled = true
+
+# Invocation logs print the full request URL, query string included, and
+# magic links and manage links carry their token there (?token=). Application
+# log lines (console.*) stay on; they never print a request URL.
+[observability.logs]
+enabled = true
+invocation_logs = false
 
 [[d1_databases]]
 binding = "DB"
