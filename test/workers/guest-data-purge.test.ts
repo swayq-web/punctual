@@ -174,8 +174,8 @@ async function seedSession(userId: string): Promise<string> {
   return `${SESSION_COOKIE_NAME}=${token}`
 }
 
-async function csrfFrom(cookie: string): Promise<string> {
-  const page = await app.fetch(new Request(`${BASE}/dashboard/admin`, { headers: { cookie } }))
+async function csrfFrom(cookie: string, path = '/dashboard/admin'): Promise<string> {
+  const page = await app.fetch(new Request(`${BASE}${path}`, { headers: { cookie } }))
   return /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1] ?? ''
 }
 
@@ -429,8 +429,13 @@ describe('erase by email', () => {
   it('is admin-only: a member gets 403 and nothing changes', async () => {
     await seedGuestEverywhere()
     const cookie = await seedSession(MEMBER_ID)
-    const res = await postErase({ csrf: await csrfFrom(cookie), email: GUEST, confirm: 'yes' }, cookie)
+    // A VALID token for the member's own session, from a page a member may
+    // open: otherwise this would 403 on CSRF and prove nothing about the role.
+    const csrf = await csrfFrom(cookie, '/dashboard/settings')
+    expect(csrf).not.toBe('')
+    const res = await postErase({ csrf, email: GUEST, confirm: 'yes' }, cookie)
     expect(res.status).toBe(403)
+    expect(await res.text()).toBe('Forbidden')
     expect(await isTombstoned('bk_e1')).toBe(false)
     expect(await count('guest_erasure_log')).toBe(0)
     expect(await count('idempotency_keys')).toBe(3)
