@@ -26,3 +26,7 @@ wrangler.production.toml
 # deployment's ids/vars/domain never belong in the public repo — see the
 # workspace CLAUDE.md hard rule 1).
 wrangler.*.toml
+
+# SwayQ fork: the staging/production configs are tracked (no secrets, placeholders only).
+!wrangler.staging.toml
+!wrangler.production.toml

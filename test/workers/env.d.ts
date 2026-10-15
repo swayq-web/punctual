@@ -8,6 +8,8 @@ import type { Env as WorkerEnv } from '../../src/index.js'
 declare global {
   namespace Cloudflare {
     interface Env extends WorkerEnv {
+      // Optional in production (the SwayQ fork omits it); the test config binds it.
+      AVATARS: R2Bucket
       TEST_MIGRATIONS: D1Migration[]
     }
   }

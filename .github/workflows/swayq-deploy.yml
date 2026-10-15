@@ -1,0 +1,109 @@
+name: SwayQ deploy
+
+# Manual deploy of the SwayQ booking Worker (SWA-1290, SWAYQ.md).
+# Secrets and the Cloudflare token live in the GitHub Environment of the same
+# name as the input. Nothing here runs on push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swayq-deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ inputs.environment }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npx vitest run
+
+      - name: Refuse placeholders and missing credentials
+        run: |
+          set -euo pipefail
+          cfg="wrangler.${TARGET}.toml"
+          test -f "$cfg"
+          if grep -nE 'REPLACE_WITH_[A-Z]' "$cfg"; then
+            echo "::error::$cfg still contains REPLACE_WITH_ placeholders. Fill them from terraform output (SWAYQ.md)."
+            exit 1
+          fi
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::Environment secret $v is not set for $TARGET"
+              exit 1
+            fi
+          done
+
+      - name: Apply D1 migrations
+        run: |
+          set -euo pipefail
+          db=$(sed -n 's/^database_name = "\(.*\)"/\1/p' "wrangler.${TARGET}.toml" | head -n1)
+          test -n "$db"
+          npx wrangler d1 migrations apply "$db" --remote -c "wrangler.${TARGET}.toml"
+
+      - name: Deploy Worker
+        run: npx wrangler deploy -c "wrangler.${TARGET}.toml"
+
+      - name: Push secrets
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          ENCRYPTION_KEY_V1: ${{ secrets.ENCRYPTION_KEY_V1 }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TURNSTILE_SECRET: ${{ secrets.TURNSTILE_SECRET }}
+          INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
+        run: |
+          set -euo pipefail
+          for v in GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET ENCRYPTION_KEY_V1 SIGNING_KEY RESEND_API_KEY TURNSTILE_SECRET INTERNAL_SERVICE_TOKEN; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::Environment secret $v is not set for $TARGET"
+              exit 1
+            fi
+          done
+          f=$(mktemp)
+          trap 'rm -f "$f"' EXIT
+          jq -n \
+            --arg GOOGLE_CLIENT_ID "$GOOGLE_CLIENT_ID" \
+            --arg GOOGLE_CLIENT_SECRET "$GOOGLE_CLIENT_SECRET" \
+            --arg ENCRYPTION_KEY_V1 "$ENCRYPTION_KEY_V1" \
+            --arg SIGNING_KEY "$SIGNING_KEY" \
+            --arg RESEND_API_KEY "$RESEND_API_KEY" \
+            --arg TURNSTILE_SECRET "$TURNSTILE_SECRET" \
+            --arg INTERNAL_SERVICE_TOKEN "$INTERNAL_SERVICE_TOKEN" \
+            '$ARGS.named' > "$f"
+          npx wrangler secret bulk "$f" -c "wrangler.${TARGET}.toml"
+
+      - name: Smoke /health
+        run: |
+          set -euo pipefail
+          host=$(sed -n 's/^routes = \[{ pattern = "\([^"]*\)".*/\1/p' "wrangler.${TARGET}.toml" | head -n1)
+          test -n "$host"
+          curl -fsS --retry 6 --retry-delay 5 --retry-all-errors "https://${host}/health"

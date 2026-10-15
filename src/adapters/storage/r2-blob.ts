@@ -10,7 +10,22 @@
 
 import type { BlobStorage } from '../../ports.js'
 
-export function createR2BlobStorage(bucket: R2Bucket): BlobStorage {
+/**
+ * A deployment without the AVATARS binding (the SwayQ fork) gets a storage
+ * that reads as empty and refuses writes with a clear error, so the Worker
+ * boots and only the upload paths fail.
+ */
+export function createR2BlobStorage(bucket: R2Bucket | undefined): BlobStorage {
+  if (!bucket) {
+    return {
+      async get() {
+        return null
+      },
+      async put() {
+        throw new Error('avatar storage disabled: this deployment has no AVATARS R2 binding')
+      },
+    }
+  }
   return {
     async get(key: string) {
       const obj = await bucket.get(key)
