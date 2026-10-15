@@ -49,6 +49,7 @@ export const da: Record<MessageKey, string> = {
   'confirm.name': 'Dit navn',
   'confirm.email': 'E-mail',
   'confirm.optional': '(valgfrit)',
+  'confirm.agenda': 'Hvad vil du gerne tale om?',
   'confirm.colleagues': 'Tilføj kolleger',
   'confirm.colleaguesHint': 'Op til 3 e-mailadresser, adskilt af komma. De bliver tilføjet til bookingen.',
   'confirm.submit': 'Bekræft booking',

@@ -19,7 +19,7 @@ import type { ResolvedHost } from '../../core/domain/hosts.js'
 import { fitKeyFor, type LogoShape } from '../../core/domain/media.js'
 import type { CompanyLogo,
   Team, EventType, Slot, User } from '../../core/domain/types.js'
-import { effectiveQuestions } from '../../core/domain/booking-service.js'
+import { AGENDA_QUESTION, effectiveQuestions } from '../../core/domain/booking-service.js'
 import { slotStateClassName } from '../../core/slot-state.js'
 import { localDateString, offsetLabel } from '../../core/time/zone.js'
 import { embedResizeScriptTag } from '../embed.js'
@@ -757,6 +757,9 @@ export function confirmForm(
       const err = errors[q.id]
       const val = escapeHtml(values[q.id] ?? '')
       const req = q.required ? ' required aria-required="true"' : ''
+      // The built-in agenda question is upstream's English wording; it speaks the guest's language. A host's own questions are shown as the host wrote them.
+      const label =
+        q.label.trim().toLowerCase() === AGENDA_QUESTION.label.toLowerCase() ? t(locale, 'confirm.agenda') : q.label
       const desc = err ? ` aria-describedby="err-${escapeHtml(q.id)}"` : ''
       const field =
         q.type === 'textarea'
@@ -772,7 +775,7 @@ export function confirmForm(
                    .join('')}
                </select>`
             : `<input id="q-${escapeHtml(q.id)}" name="q_${escapeHtml(q.id)}" value="${val}"${req}${desc}>`
-      return `<label for="q-${escapeHtml(q.id)}">${escapeHtml(q.label)}${q.required ? '' : ` <span class="pu-muted">${escapeHtml(t(locale, 'confirm.optional'))}</span>`}</label>
+      return `<label for="q-${escapeHtml(q.id)}">${escapeHtml(label)}${q.required ? '' : ` <span class="pu-muted">${escapeHtml(t(locale, 'confirm.optional'))}</span>`}</label>
         ${field}
         ${err ? `<p class="pu-err" id="err-${escapeHtml(q.id)}">${escapeHtml(err)}</p>` : ''}`
     })

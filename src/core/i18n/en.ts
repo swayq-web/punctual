@@ -49,6 +49,7 @@ export const en = {
   'confirm.name': 'Your name',
   'confirm.email': 'Email',
   'confirm.optional': '(optional)',
+  'confirm.agenda': 'What would you like to discuss?',
   'confirm.colleagues': 'Add colleagues',
   'confirm.colleaguesHint': 'Up to 3 email addresses, separated by commas. They will be added to the booking.',
   'confirm.submit': 'Confirm booking',

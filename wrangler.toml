@@ -132,7 +132,14 @@ SUPPORT_EMAIL = "you@your-domain.example"
 # Off unless explicitly enabled (ADR-0006 §5).
 TELEMETRY_ENABLED = "0"
 
+# Cloudflare Turnstile on the booking confirm form (SwayQ guest UI). The site
+# key is public; TURNSTILE_REQUIRED turns enforcement on, and from then on a
+# missing TURNSTILE_SECRET refuses bookings instead of skipping the check.
+#TURNSTILE_SITE_KEY = "0x4AAAAAAA..."
+#TURNSTILE_REQUIRED = "1"
+
 # Secrets — set with `wrangler secret put`, never in this file:
+#   TURNSTILE_SECRET    Turnstile server key (siteverify)
 #   ENCRYPTION_KEY_V1   base64 32 bytes, AES-GCM for refresh tokens at rest
 #   SIGNING_KEY         base64 32 bytes, HMAC for manage links
 #   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET

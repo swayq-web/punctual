@@ -577,7 +577,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
           errorPage(t(lang.locale, 'err.tooManyBookings.title'), t(lang.locale, 'err.waitAndRetry')) +
           guestFoot(ports, lang),
         429,
-        { ...guestHeaders(lang), 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
+        { ...guestHeaders(lang, c), 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
       )
     }
 
@@ -679,7 +679,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
           }) +
           shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
         400,
-        guestHeaders(lang),
+        guestHeaders(lang, c),
       )
     }
 
@@ -700,7 +700,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
           shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
         429,
         {
-          ...guestHeaders(lang),
+          ...guestHeaders(lang, c),
           'retry-after': String(Math.ceil((perGuest.resetAt - ports.clock.now()) / 1000)),
         },
       )
@@ -753,7 +753,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
           body +
           shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
         409,
-        guestHeaders(lang),
+        guestHeaders(lang, c),
       )
     }
 
@@ -792,7 +792,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
         }) +
         shellFoot(true, embed, displayCompany(data), { locale: lang.locale, brandName: ports.config.brandName }),
       200,
-      { ...manageHeaders(), ...guestHeaders(lang) },
+      { ...manageHeaders(), ...guestHeaders(lang, c) },
     )
   })
 
@@ -948,7 +948,7 @@ function notFound(c: Context<{ Bindings: Env }>, ports: EnginePorts): Response |
       errorPage(t(lang.locale, 'err.notFound.title'), t(lang.locale, 'err.notFound.body')) +
       shellFoot(true, false, null, { locale: lang.locale, brandName: ports.config.brandName }),
     404,
-    guestHeaders(lang),
+    guestHeaders(lang, c),
   )
 }
 
@@ -991,7 +991,7 @@ async function bookingPageRateLimited(
       errorPage(t(lang.locale, 'err.tooManyRequests.title'), t(lang.locale, 'err.waitAndRetry')) +
       shellFoot(true, false, null, { locale: lang.locale, brandName: ports.config.brandName }),
     429,
-    { ...guestHeaders(lang), 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
+    { ...guestHeaders(lang, c), 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
   )
 }
 
