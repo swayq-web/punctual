@@ -75,12 +75,14 @@ import {
 } from '../core/domain/auth-flows.js'
 import { OAUTH_ENDPOINTS, needsSetup, scopesFor, type OAuthPurpose } from '../adapters/oauth.js'
 import { dayRange } from '../engine.js'
+import { BOOKING_DRIFTED_MESSAGE, isDrifted } from '../core/domain/calendar-sync.js'
 import { formatInZone, isValidTimeZone, localDateString } from '../core/time/zone.js'
 import { validateSlug } from '../core/domain/slugs.js'
 import { canManageTeam, isManagingRole } from '../core/domain/teams.js'
 import { hostUsers, hostsForReschedule, resolveHosts as resolveEventTypeHosts } from '../core/domain/hosts.js'
 import { changeBookingHosts } from '../core/domain/booking-hosts.js'
 import { saveCalendarConnection } from './calendar-connect.js'
+import { redriveAfterReconnect } from '../adapters/calendar-sync-redrive.js'
 import { insightsPage } from './pages/insights.js'
 import { CHANNEL_EVENTS, channelAad, parseChannelEvents, parseDestination, type ChannelConfig, type NotificationChannel } from '../core/domain/chat-notify.js'
 import { postChatMessage } from '../adapters/chat.js'
@@ -544,6 +546,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
         crypto: ports.crypto,
         clock: ports.clock,
         listCalendars: (conn) => ports.calendars.get(provider).listCalendars(conn),
+        onCalendarUsable: (userId) => redriveAfterReconnect(ports, userId),
       },
       auth.user.id,
       provider,
@@ -3279,6 +3282,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     if (verified.booking.status !== 'confirmed') {
       return manageError(c, 'This booking is no longer active.')
     }
+    if (isDrifted(verified.booking)) return manageError(c, BOOKING_DRIFTED_MESSAGE)
 
     const cancelled = await cancelBooking(repos, verified.booking, { cancelledBy: 'guest' })
     if (!cancelled) return manageError(c, 'This booking is no longer active.')
@@ -3315,6 +3319,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     if (old.status !== 'confirmed') {
       return manageError(c, 'This booking is no longer active.')
     }
+    if (isDrifted(old)) return manageError(c, BOOKING_DRIFTED_MESSAGE)
 
     const repos = ports.repositories(guestScope())
     const eventType = await repos.eventTypes.byId(old.eventTypeId)

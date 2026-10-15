@@ -260,7 +260,63 @@ export interface Booking {
   manageTokenHash: string
   cancelledAt: number | null
   createdAt: number
+  /**
+   * Where this booking's calendar events stand (migration 0018). Optional
+   * because a booking built in memory before its first write has none yet;
+   * every row read from D1 carries them. See core/domain/calendar-sync.ts.
+   */
+  calendarSyncStatus?: CalendarSyncStatus
+  calendarSyncAttempts?: number
+  /** An error CATEGORY only, never a provider body or guest data. */
+  calendarSyncError?: CalendarSyncErrorCategory | null
+  /** When the events were last known to match this booking. */
+  calendarSyncedAt?: number | null
+  /** When the sync state last changed; the reconciler skips a booking mid-retry. */
+  calendarSyncUpdatedAt?: number | null
+  /**
+   * The calendar each stored event was written to, keyed like
+   * `externalEventIds` (connection id -> calendar id). Absent for a key means
+   * unknown (an event written before migration 0018).
+   */
+  externalEventCalendars?: Record<string, string>
+  /**
+   * How the guest's confirmation reached them, recorded when it was sent:
+   * 'google' when a Google event existed for the booking then, else 'ics'.
+   * Cancel and reschedule notifications follow it. Null until sent.
+   */
+  inviteChannel?: InviteChannel | null
+  /** The guest's language (e.g. 'en', 'da'); null or absent means the deployment default. */
+  guestLocale?: string | null
 }
+
+export type InviteChannel = 'google' | 'ics'
+
+export type CalendarSyncStatus = 'pending' | 'synced' | 'failed' | 'drifted'
+
+/**
+ * Why a calendar write did not land, as a category. Stored on the booking and
+ * logged; the raw provider error never is, because provider bodies can echo
+ * attendee addresses.
+ */
+export type CalendarSyncErrorCategory =
+  /** Retryable: the provider asked us to slow down (429, or Google's 403 rate-limit reasons). */
+  | 'rate_limited'
+  /** Retryable: the provider failed (5xx). */
+  | 'provider_unavailable'
+  /** Retryable: the request never got an answer (network error, timeout). */
+  | 'network'
+  /** Permanent: the grant was revoked or expired; the host must reconnect. */
+  | 'needs_reconnect'
+  /** Permanent: the provider's calendar API is not enabled for the operator's app. */
+  | 'setup_required'
+  /** Permanent: 403, the account may not write to that calendar. */
+  | 'permission_denied'
+  /** Permanent: 404/410, the calendar (or event) no longer exists. */
+  | 'not_found'
+  /** Permanent: any other 4xx, or a connection with no write calendar. */
+  | 'rejected'
+  /** The queue gave up after its last retry (dead-letter queue). */
+  | 'retries_exhausted'
 
 export interface SlotHold {
   id: string

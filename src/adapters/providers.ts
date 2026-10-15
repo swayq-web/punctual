@@ -10,6 +10,8 @@
 import type { CalendarProvider, CalendarProviderName, CalendarProviders } from '../ports.js'
 import { createGoogleProvider } from './google/provider.js'
 import { createMicrosoftProvider } from './microsoft/provider.js'
+import { createGoogleGetEvent } from './google/get-event.js'
+import { createMicrosoftGetEvent } from './microsoft/get-event.js'
 import { CalendarApiError, type CalendarProviderDeps } from './oauth.js'
 
 const ORDER: CalendarProviderName[] = ['google', 'microsoft']
@@ -17,9 +19,12 @@ const ORDER: CalendarProviderName[] = ['google', 'microsoft']
 export function createCalendarProviders(deps: CalendarProviderDeps): CalendarProviders {
   // Built eagerly — the factories only close over deps, so there is nothing to
   // defer and a lazy map would just add a branch to every call.
+  //
+  // `getEvent` (the drift check's read-back) lives in its own files for now
+  // and is attached here, so this change does not touch either provider.ts.
   const providers: Record<CalendarProviderName, CalendarProvider> = {
-    google: createGoogleProvider(deps),
-    microsoft: createMicrosoftProvider(deps),
+    google: { ...createGoogleProvider(deps), getEvent: createGoogleGetEvent(deps) },
+    microsoft: { ...createMicrosoftProvider(deps), getEvent: createMicrosoftGetEvent(deps) },
   }
 
   const available = ORDER.filter((name) => deps.oauth.forProvider(name) !== null)

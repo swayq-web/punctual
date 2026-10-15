@@ -21,6 +21,8 @@ import type { WebhookEvent,
   CompanyLogo,
   Booking,
   CalendarConnection,
+  CalendarSyncErrorCategory,
+  InviteChannel,
   EventType,
   EventTypeHost,
   Interval,
@@ -351,7 +353,13 @@ export interface BookingRepository {
    * write. Separate from `setExternalEventIds` only because the ids alone are
    * still the right write for a delete, which has no link to record.
    */
-  setSyncResult(bookingId: string, ids: Record<string, string>, conferenceUrl: string | null): Promise<void>
+  setSyncResult(
+    bookingId: string,
+    ids: Record<string, string>,
+    conferenceUrl: string | null,
+    /** connection id -> the calendar each event was written to (migration 0018); omitted leaves it as is. */
+    calendars?: Record<string, string>,
+  ): Promise<void>
   /**
    * Claim the right to send this booking's confirmation, exactly once.
    *
@@ -369,6 +377,70 @@ export interface BookingRepository {
    * permanently missing confirmation that the record calls sent.
    */
   releaseConfirmationClaim(bookingId: string): Promise<void>
+
+  // ---- calendar sync state (migration 0018) ----
+
+  /**
+   * Every planned event exists (or there was nothing to write): status
+   * `synced`, error cleared, `calendar_synced_at = calendar_sync_updated_at = at`. A `drifted` booking
+   * stays drifted unless `clearDrift`: only a pass that actually rewrote the
+   * events (an update) has put them back in line; a redelivered create that
+   * wrote nothing has not.
+   */
+  markCalendarSynced(bookingId: string, at: number, opts?: { clearDrift?: boolean }): Promise<void>
+  /**
+   * A retryable failure, recorded ONLY on a booking that is `pending` or
+   * `failed` (attempts + 1, category, `calendar_sync_updated_at = at`; status
+   * kept). A stale retry never downgrades `synced` or `drifted` back to
+   * `pending`, which would let the dead-letter path fail a healthy booking.
+   */
+  recordCalendarSyncRetry(bookingId: string, category: CalendarSyncErrorCategory, at: number): Promise<void>
+  /**
+   * Move to `failed`, counting the attempt. `category` null keeps the last
+   * recorded one (the dead-letter path), falling back to `retries_exhausted`.
+   * `fromPendingOnly` is the dead-letter path's guard: a booking some later
+   * pass already brought to `synced` (or found `drifted`) is not failed by a
+   * stale message giving up.
+   * @returns true only to the caller that moved it there, so the host is
+   *          told once however many messages give up on the same booking.
+   */
+  markCalendarSyncFailed(
+    bookingId: string,
+    category: CalendarSyncErrorCategory | null,
+    opts?: { fromPendingOnly?: boolean; at?: number },
+  ): Promise<boolean>
+  /**
+   * `failed` -> `pending`, conditional: a booking about to be re-driven after
+   * its host reconnected. True only to the caller that reopened it, so a
+   * later failure alerts again.
+   */
+  reopenCalendarSync(bookingId: string, at: number): Promise<boolean>
+  /**
+   * Confirmed, upcoming bookings of this host (primary or co-host) that
+   * `failed` with `needs_reconnect`: what a reconnect re-drives.
+   */
+  listFailedNeedingReconnect(hostUserId: string, now: number, limit: number): Promise<Booking[]>
+  /** Record how the guest's confirmation reached them (`invite_channel`). */
+  setInviteChannel(bookingId: string, channel: InviteChannel): Promise<void>
+  /**
+   * `synced` -> `drifted`, conditional inside the UPDATE.
+   * @returns true only to the caller that made the move, so the host is told once.
+   */
+  markCalendarDrifted(bookingId: string): Promise<boolean>
+  /** A drift check found the events unchanged: `calendar_synced_at = at`, nothing else. */
+  touchCalendarVerified(bookingId: string, at: number): Promise<void>
+  /**
+   * Confirmed, upcoming (`start_utc > now`), `pending`, no stored event ids,
+   * created before `createdBefore`: bookings whose create sync never landed.
+   * Excludes a booking still in its own retry chain (attempts > 0 and sync
+   * state touched at or after `retryActiveSince`). Soonest first, at most `limit`.
+   */
+  listStuckCalendarSyncs(now: number, createdBefore: number, limit: number, retryActiveSince: number): Promise<Booking[]>
+  /**
+   * Confirmed, `synced`, with stored event ids, starting in `range`: the drift
+   * check's candidates, least recently verified first, at most `limit`.
+   */
+  listCalendarDriftCandidates(range: Interval, limit: number): Promise<Booking[]>
 }
 
 export type BookingListView = 'upcoming' | 'past' | 'cancelled'
@@ -566,6 +638,13 @@ export interface CalendarProvider {
   updateEvent(conn: CalendarConnection, externalId: string, event: ExternalEvent): Promise<void>
   deleteEvent(conn: CalendarConnection, externalId: string): Promise<void>
   /**
+   * Read back one event this engine wrote, for the drift check
+   * (adapters/scheduled.ts). `null` means it is gone: deleted, or cancelled
+   * at the provider. Optional so a provider without it simply skips the
+   * drift check rather than failing it. Throws like the other calls.
+   */
+  getEvent?(conn: CalendarConnection, externalId: string, calendarId?: string): Promise<ExternalEventSnapshot | null>
+  /**
    * The account's calendars. `accountEmail` is the address the provider
    * shows as the calendar's owner where it does — Google's primary calendar
    * id, Graph's `owner.address` — and is how a connection learns which
@@ -587,6 +666,12 @@ export interface CreatedEvent {
   id: string
   /** Absent for a non-conference event type, or if the provider minted none. */
   conferenceUrl?: string
+}
+
+/** What the drift check needs from a provider event: when it is. */
+export interface ExternalEventSnapshot {
+  start: number
+  end: number
 }
 
 export interface ExternalEvent {

@@ -116,6 +116,7 @@ export function createMicrosoftProvider(deps: CalendarProviderDeps): CalendarPro
       const created = await readJson<unknown>(conn, res, 'events.create')
       if (!isRecord(created) || typeof created['id'] !== 'string') {
         throw new CalendarApiError('microsoft', 'events.create returned no event id', {
+          status: res.status,
           body: JSON.stringify(created).slice(0, 500),
         })
       }

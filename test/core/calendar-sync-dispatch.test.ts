@@ -16,7 +16,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import type { Booking, CalendarConnection, EventType, EventTypeHost, User } from '../../src/core/domain/types.js'
+import type { Booking, CalendarConnection, CalendarSyncErrorCategory, EventType, EventTypeHost, User } from '../../src/core/domain/types.js'
 import type { EnginePorts, QueueMessage } from '../../src/ports.js'
 import { handleOne } from '../../src/adapters/queue/consumer.js'
 
@@ -151,6 +151,35 @@ function harness(opts: HarnessOptions = {}) {
         },
         async rotateManageToken() { rotated = true },
         async releaseConfirmationClaim() { claimed = false },
+        async setInviteChannel(_id: string, channel: 'google' | 'ics') {
+          store.booking = { ...store.booking, inviteChannel: channel }
+        },
+        // Calendar sync state (migration 0018), with the D1 adapter's conditions.
+        async markCalendarSynced(_id: string, at: number, o?: { clearDrift?: boolean }) {
+          if (store.booking.calendarSyncStatus === 'drifted' && !o?.clearDrift) return
+          store.booking = { ...store.booking, calendarSyncStatus: 'synced', calendarSyncError: null, calendarSyncedAt: at }
+        },
+        async recordCalendarSyncRetry(_id: string, category: CalendarSyncErrorCategory) {
+          const b = store.booking
+          store.booking = {
+            ...b,
+            calendarSyncAttempts: (b.calendarSyncAttempts ?? 0) + 1,
+            calendarSyncError: category,
+            calendarSyncStatus: b.calendarSyncStatus === 'failed' ? 'failed' : 'pending',
+          }
+        },
+        async markCalendarSyncFailed(_id: string, category: CalendarSyncErrorCategory | null, o?: { fromPendingOnly?: boolean }) {
+          const b = store.booking
+          if (b.calendarSyncStatus === 'failed') return false
+          if (o?.fromPendingOnly && (b.calendarSyncStatus ?? 'pending') !== 'pending') return false
+          store.booking = {
+            ...b,
+            calendarSyncStatus: 'failed',
+            calendarSyncAttempts: (b.calendarSyncAttempts ?? 0) + 1,
+            calendarSyncError: category ?? b.calendarSyncError ?? 'retries_exhausted',
+          }
+          return true
+        },
       },
       eventTypes: { async byId() { return { ...eventType, ...opts.eventTypePatch } } },
       eventTypeHosts: { async forEventType() { return opts.hostRows ?? [] } },
@@ -158,6 +187,9 @@ function harness(opts: HarnessOptions = {}) {
         async byId(id: string) {
           if (id === host.id) return host
           return opts.users?.find((u) => u.id === id) ?? null
+        },
+        async listAll() {
+          return [host, ...(opts.users ?? [])]
         },
       },
       connections: {
@@ -479,12 +511,14 @@ describe('confirmation dispatch', () => {
     // A calendar outage must not become an email outage — the whole reason
     // dispatch sits after the per-connection catch rather than depending on
     // the sync succeeding.
+    // Since SWA-1286 the sync ALSO rethrows so the queue retries the
+    // calendar write: the email goes out, and the calendar is not given up on.
     const h = harness({
       createEvent: async () => {
         throw new Error('google is down')
       },
     })
-    await handleOne(h.sync, h.ports)
+    await expect(handleOne(h.sync, h.ports)).rejects.toThrow(/will be retried: network/)
     expect(h.emails().length).toBeGreaterThan(0)
   })
 

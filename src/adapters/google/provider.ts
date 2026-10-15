@@ -104,6 +104,7 @@ export function createGoogleProvider(deps: CalendarProviderDeps): CalendarProvid
       const created = await readJson<unknown>(conn, res, 'events.insert')
       if (!isRecord(created) || typeof created['id'] !== 'string') {
         throw new CalendarApiError('google', 'events.insert returned no event id', {
+          status: res.status,
           body: JSON.stringify(created).slice(0, 500),
         })
       }

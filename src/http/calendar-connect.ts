@@ -20,6 +20,13 @@ export interface ConnectDeps {
   crypto: Pick<Crypto, 'encrypt' | 'randomToken'>
   clock: Clock
   listCalendars: (conn: CalendarConnection) => Promise<Array<{ id: string; name: string; primary: boolean; accountEmail?: string }>>
+  /**
+   * Called once the host has a usable calendar again: a broken connection
+   * repaired, or a new one added. Re-drives their upcoming bookings whose
+   * sync failed for want of a calendar (adapters/calendar-sync-redrive.ts).
+   * Best-effort: a failure here must not lose the grant just saved.
+   */
+  onCalendarUsable?: (userId: string) => Promise<unknown>
 }
 
 /** The grant as the provider issued it, plus what its id_token said about the account ('' when nothing). */
@@ -129,8 +136,16 @@ export async function saveCalendarConnection(
     selectionChanged = true
   }
 
+  const calendarUsable = async (): Promise<void> => {
+    if (!deps.onCalendarUsable || connection.calendarIdWrite === null) return
+    await deps.onCalendarUsable(userId).catch((err) =>
+      console.error('[punctual] re-driving calendar syncs after connect failed', err instanceof Error ? err.name : 'unknown'),
+    )
+  }
+
   if (!reuse) {
     await repos.connections.create(connection)
+    await calendarUsable()
     return { connection, reconnected: false }
   }
   // Column by column, never delete+create: a failure mid-way must not lose
@@ -143,6 +158,7 @@ export async function saveCalendarConnection(
   if (selectionChanged) {
     await repos.connections.updateCalendars(reuse.id, { read: connection.calendarIdsRead, write: connection.calendarIdWrite })
   }
+  if (reuse.syncStatus !== 'ok') await calendarUsable()
   return { connection, reconnected: true }
 }
 
