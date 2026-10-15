@@ -31,6 +31,12 @@ import type { EnginePorts, RequestScope } from './ports.js'
 
 export { HostCalendar } from './do/host-calendar.js'
 export { RateLimiter } from './do/rate-limiter.js'
+/**
+ * Named entrypoint for staff-to-staff scheduling, reachable ONLY through a
+ * service binding from another Worker in this account (src/internal/,
+ * docs/internal-api.md). The default export below never routes to it.
+ */
+export { InternalApi } from './internal/entrypoint.js'
 
 export interface Env {
   DB: D1Database
