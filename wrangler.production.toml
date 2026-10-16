@@ -35,13 +35,13 @@ invocation_logs = false
 binding = "DB"
 database_name = "swayq-booking"
 # terraform output booking_d1_database_ids.production
-database_id = "REPLACE_WITH_D1_ID_PRODUCTION"
+database_id = "e21fa5ff-4746-4ab4-bdce-2fd09d7da060"
 migrations_dir = "migrations"
 
 [[kv_namespaces]]
 binding = "CACHE"
 # terraform output booking_kv_cache_ids.production
-id = "REPLACE_WITH_KV_ID_PRODUCTION"
+id = "21c8e09375044734a209a4502853774c"
 
 # No AVATARS (R2) binding: the app uses a null blob storage when it is absent
 # (avatar/logo uploads fail with a clear error). See SWAYQ.md.
@@ -95,7 +95,7 @@ SIGNUPS = "@swayq.com"
 INTERNAL_ALLOWED_DOMAINS = "swayq.com"
 TURNSTILE_REQUIRED = "true"
 # terraform output booking_turnstile_site_keys.production (public)
-TURNSTILE_SITE_KEY = "REPLACE_WITH_TURNSTILE_SITE_KEY_PRODUCTION"
+TURNSTILE_SITE_KEY = "0x4AAAAAAFYMw8x5hqEEZ_MO"
 TELEMETRY_ENABLED = "0"
 
 # Secrets (pushed by the deploy workflow, never in this file):
