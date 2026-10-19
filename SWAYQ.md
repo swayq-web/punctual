@@ -33,7 +33,7 @@ Resolve conflicts here first when merging upstream. Files marked (new) do not
 exist upstream.
 
 - i18n (new): `src/core/i18n/{index,en,da}.ts`; wired through `src/http/pages/*`, `src/core/email-templates.ts`, `src/http/router.ts`
-- Pages and skin: `src/http/pages/{booking,dashboard}.ts`, `src/http/pages/manage.ts` (new), `src/http/swayq-skin.ts` (new), `src/http/streaming.ts`, `src/http/turnstile.ts` (new), `src/http/router.ts`, `src/swayq-surfaces.ts` (new, surface switches), `assets/fonts/*` (Poppins, OFL)
+- Pages and skin: `src/http/pages/{booking,dashboard}.ts`, `src/http/pages/manage.ts` (new), `src/http/swayq-skin.ts` (new, also holds `SWAYQ_FAVICON` served at `/favicon.svg`), `src/http/streaming.ts`, `src/http/turnstile.ts` (new), `src/http/router.ts`, `src/swayq-surfaces.ts` (new, surface switches), `assets/fonts/*` (Poppins, OFL)
 - Email and notifications: `src/core/email-templates.ts`, `src/core/ics.ts`, `src/core/domain/guest-history.ts` (new), `src/adapters/notify.ts`
 - Calendar sync (durable, fail-closed): `migrations/0018_calendar_sync_state.sql`, `src/adapters/{calendar-sync-alerts,calendar-sync-errors,calendar-sync-redrive,coordinator,providers,scheduled}.ts`, `src/adapters/d1/{repositories,schema}.ts`, `src/adapters/google/{get-event,internal-meetings,provider}.ts`, `src/adapters/microsoft/{get-event,provider}.ts`, `src/adapters/queue/consumer.ts`, `src/core/domain/{booking-service,calendar-sync,types}.ts`, `src/engine.ts`, `src/ports.ts`, `src/http/{calendar-connect,dashboard-routes}.ts`, `src/http/api/rest.ts`, `src/http/mcp/server.ts`, `src/index.ts`, `src/testing/fakes.ts`
 - Internal API (new, service binding to the swayq Worker): `src/internal/{contract,entrypoint,schemas,service,token}.ts`, `docs/internal-api.md`

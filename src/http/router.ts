@@ -51,6 +51,7 @@ import {
   joinNames,
 } from './pages/booking.js'
 import { manageHeaders } from './pages/manage.js'
+import { SWAYQ_FAVICON } from './swayq-skin.js'
 import {
   langCookieHeader,
   resolveLocale,
@@ -338,7 +339,7 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
   )
 
   app.get('/favicon.svg', (c) =>
-    c.body(FAVICON, 200, {
+    c.body(SWAYQ_FAVICON, 200, {
       'content-type': 'image/svg+xml',
       'cache-control': 'public, max-age=86400',
     }),
@@ -1003,10 +1004,3 @@ async function bookingPageRateLimited(
     { ...guestHeaders(lang, c), 'retry-after': String(Math.ceil((limit.resetAt - ports.clock.now()) / 1000)) },
   )
 }
-
-/** The colon mark on an ink tile (docs/branding). Inline to avoid an asset fetch. */
-const FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-<rect width="32" height="32" rx="7" fill="#0F1512"/>
-<rect x="13" y="9" width="6" height="6" rx="2" fill="#1FC16B"/>
-<rect x="13" y="19" width="6" height="6" rx="2" fill="#1FC16B"/>
-</svg>`

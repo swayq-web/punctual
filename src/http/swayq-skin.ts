@@ -116,3 +116,15 @@ time,.pu-time{font-weight:500}
 export function guestPageCss(): string {
   return SWAYQ_FONT_FACES + TOKENS + BASE_CSS + SWAYQ_SKIN_CSS
 }
+
+/**
+ * The swayq-2026 favicon, served at /favicon.svg (router.ts). Byte-for-byte
+ * the mark swayq.com serves (apps/web/public/logo-swayq-2026-favicon.svg,
+ * comment stripped): Carbon tile, white ring, Learning Lime dot.
+ */
+export const SWAYQ_FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-label="swayq.">
+  <rect width="512" height="512" rx="102.4" fill="#0e0e0e"/>
+  <rect x="12.8" y="12.8" width="486.4" height="486.4" rx="89.6" fill="none" stroke="#4a4a4a" stroke-width="25.6"/>
+  <path d="M 320.914 395.209 A 153.6 153.6 0 1 1 395.209 320.914" fill="none" stroke="#ffffff" stroke-width="13.166" stroke-linecap="round"/>
+  <circle cx="379.817" cy="379.817" r="24.686" fill="#dbed72"/>
+</svg>`
