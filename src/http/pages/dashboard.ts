@@ -53,7 +53,7 @@ import { slotStateClassName } from '../../core/slot-state.js'
 import { slugify } from '../../core/domain/booking-service.js'
 import { formatInZone, offsetLabel } from '../../core/time/zone.js'
 import type { ResolvedHost } from '../../core/domain/hosts.js'
-import { SWAYQ_SURFACES } from '../../swayq-surfaces.js'
+import { SWAYQ_SURFACES, upstreamPages } from '../../swayq-surfaces.js'
 import { avatarHtml, escapeHtml, hostsSentence, joinNames, logoHtml, shellFoot, shellHead } from './booking.js'
 
 // ---------------------------------------------------------------------------
@@ -111,14 +111,18 @@ export interface DashboardChrome {
  * commit, calendars sync, the dashboard looks healthy, and every guest gets
  * nothing. Deliberately not dismissible and not admin-gated.
  */
+/** The "see self-hosting" pointer on operator notices; the page only exists with UPSTREAM_PAGES on. */
+function selfHostingPointer(label = 'self-hosting'): string {
+  return upstreamPages() ? `\n    &mdash; see <a href="/docs/self-hosting">${label}</a>` : ''
+}
+
 function emailWarningBanner(chrome: DashboardChrome): string {
   if (chrome.emailDelivery !== 'console' && !chrome.emailProblem) return ''
   if (chrome.emailProblem && chrome.emailDelivery !== 'console') {
     // Named provider unusable, mail going through something else: say so,
     // it is a misconfiguration even though mail is flowing.
     return `<div role="alert" class="pu-callout" style="margin:0 0 1.25rem">
-  <p style="margin:0"><strong>Email is not going where you configured it to.</strong> ${escapeHtml(chrome.emailProblem)}
-    &mdash; see <a href="/docs/self-hosting">self-hosting</a>.</p>
+  <p style="margin:0"><strong>Email is not going where you configured it to.</strong> ${escapeHtml(chrome.emailProblem)}${selfHostingPointer()}.</p>
 </div>`
   }
   return `<div role="alert" class="pu-callout" style="margin:0 0 1.25rem">
@@ -127,8 +131,7 @@ function emailWarningBanner(chrome: DashboardChrome): string {
     Bookings are being saved and synced to calendars, but every confirmation, reschedule notice,
     cancellation and reminder is written to the log instead of sent. Add a
     <code>[[send_email]]</code> binding for Cloudflare Email Service, or set
-    <code>RESEND_API_KEY</code> or <code>BREVO_API_KEY</code> as a secret, then redeploy
-    &mdash; see <a href="/docs/self-hosting">self-hosting</a>.</p>
+    <code>RESEND_API_KEY</code> or <code>BREVO_API_KEY</code> as a secret, then redeploy${selfHostingPointer()}.</p>
 </div>`
 }
 
@@ -201,9 +204,13 @@ function shellBottom(brandName: string): string {
   <div class="pu-wrap pu-dash-foot-row">
     <a class="pu-mark" href="/">${escapeHtml(brandName.toLowerCase())}<span>:</span></a>
     <nav aria-label="Dashboard footer">
-      <a href="/docs">Docs</a>
+      ${
+        upstreamPages()
+          ? `<a href="/docs">Docs</a>
       <a href="/docs/api">API</a>
-      <a href="/docs/mcp">MCP</a>
+      <a href="/docs/mcp">MCP</a>`
+          : ''
+      }
       <a href="/privacy">Privacy</a>
       <a href="/terms">Terms</a>
     </nav>
@@ -1966,8 +1973,12 @@ export function connectionsPage(d: ConnectionsPageData): string {
   // also run the deployment is the fix theirs to make.
   const connectButtons =
     providers.length === 0
-      ? `<p class="pu-muted">This deployment has no Google or Microsoft credentials yet. If you run it, see
-       <a href="/docs/self-hosting">self-hosting &rarr; calendar providers</a>; otherwise ask your admin.</p>`
+      ? `<p class="pu-muted">This deployment has no Google or Microsoft credentials yet. ${
+          upstreamPages()
+            ? `If you run it, see
+       <a href="/docs/self-hosting">self-hosting &rarr; calendar providers</a>; otherwise ask your admin.`
+            : 'Ask your admin.'
+        }</p>`
       : providers
           .map(
             (p) =>
@@ -3162,7 +3173,11 @@ function homepageForm(d: AdminPageData, errors: Record<string, string>): string 
     ${csrfField(d.csrf)}
     <fieldset style="border:0;padding:0;margin:0 0 1rem">
       <legend style="font-weight:600;margin-bottom:.35rem">Show</legend>
-      <label style="${row('margin:.25rem 0')}"><input type="radio" name="home_mode" value="landing"${h.mode === 'landing' ? ' checked' : ''} style="margin-top:.2rem"><span><strong>The ${escapeHtml(d.brandName)} landing</strong> <span class="pu-muted">— what punctual.sh shows: the product, the pledge, the docs</span></span></label>
+      <label style="${row('margin:.25rem 0')}"><input type="radio" name="home_mode" value="landing"${h.mode === 'landing' ? ' checked' : ''} style="margin-top:.2rem"><span>${
+        upstreamPages()
+          ? `<strong>The ${escapeHtml(d.brandName)} landing</strong> <span class="pu-muted">— what punctual.sh shows: the product, the pledge, the docs</span>`
+          : '<strong>Sign-in</strong> <span class="pu-muted">— signed-in staff go to the dashboard, everyone else to the sign-in page</span>'
+      }</span></label>
       <label style="${row('margin:.25rem 0')}"><input type="radio" name="home_mode" value="index"${h.mode === 'index' ? ' checked' : ''} style="margin-top:.2rem"><span><strong>This instance</strong> <span class="pu-muted">— your company logo, a title and intro, your site and contact, and the booking links below</span></span></label>
     </fieldset>
     <div class="pu-grid" style="grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));gap:0 1rem">
@@ -3199,7 +3214,7 @@ function homepageForm(d: AdminPageData, errors: Record<string, string>): string 
  */
 function trafficSection(d: AdminPageData): string {
   if (!d.trafficConfigured) {
-    return `<p class="pu-muted">Cloudflare's view of this host's traffic — requests per day, top paths, countries, user agents. Set <code>CLOUDFLARE_ZONE_ID</code> in <code>[vars]</code> (and a token with <em>Zone Analytics: Read</em>, or reuse <code>INSIGHTS_API_TOKEN</code>) — see <a href="/docs/self-hosting">self-hosting</a>.</p>`
+    return `<p class="pu-muted">Cloudflare's view of this host's traffic — requests per day, top paths, countries, user agents. Set <code>CLOUDFLARE_ZONE_ID</code> in <code>[vars]</code> (and a token with <em>Zone Analytics: Read</em>, or reuse <code>INSIGHTS_API_TOKEN</code>)${upstreamPages() ? ' — see <a href="/docs/self-hosting">self-hosting</a>' : ''}.</p>`
   }
   const t = d.traffic
   if (!t) return `<p class="pu-muted">Cloudflare did not answer just now. The reason is in the Worker's log.</p>`

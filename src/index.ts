@@ -27,6 +27,7 @@ import { createRateLimiterAdapter } from './adapters/rate-limiter.js'
 import { handleOne, handleQueueBatch } from './adapters/queue/consumer.js'
 import { runScheduledTasks } from './adapters/scheduled.js'
 import { parseSignupPolicy } from './core/domain/auth-flows.js'
+import { parseSwitch } from './swayq-surfaces.js'
 import type { EnginePorts, RequestScope } from './ports.js'
 
 export { HostCalendar } from './do/host-calendar.js'
@@ -58,6 +59,8 @@ export interface Env {
   FROM_NAME?: string
   SUPPORT_EMAIL?: string
   TELEMETRY_ENABLED?: string
+  /** "1" / "true": serve the upstream landing, docs and attribution. Off for SwayQ (src/swayq-surfaces.ts). */
+  UPSTREAM_PAGES?: string
   ENCRYPTION_KEY_V1?: string
   ENCRYPTION_KEY_V2?: string
   SIGNING_KEY?: string
@@ -224,6 +227,7 @@ export function buildPorts(env: Env): EnginePorts {
       emailDelivery,
       ...(emailProblem ? { emailProblem } : {}),
       telemetryEnabled: env.TELEMETRY_ENABLED === '1',
+      upstreamPages: parseSwitch(env.UPSTREAM_PAGES),
     },
     // Constructed last: it needs the other ports.
     coordinator: undefined as never,

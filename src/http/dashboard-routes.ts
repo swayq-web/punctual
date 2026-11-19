@@ -2456,7 +2456,7 @@ export function buildDashboardRoutes(ports: EnginePorts, slots: SlotService): Ap
     // Only a picked link can be featured; anything else means none.
     await repos.settings.set(HOME_FEATURED, picked.includes(featured) ? featured : '', now)
     await advanceBookmark(c)
-    return renderAdmin(c, { notice: mode === 'index' ? 'Homepage saved — / now shows this instance.' : 'Homepage saved — / shows the landing.' })
+    return renderAdmin(c, { notice: mode === 'index' ? 'Homepage saved — / now shows this instance.' : ports.config.upstreamPages ? 'Homepage saved — / shows the landing.' : 'Homepage saved — / goes to sign-in.' })
   })
 
   // ---- Slack / Telegram notification channels (core/domain/chat-notify.ts) ----
@@ -3686,7 +3686,7 @@ function guestScope(): RequestScope {
   return { consistency: 'bookmark' }
 }
 
-function readCookie(header: string | undefined, name: string): string | null {
+export function readCookie(header: string | undefined, name: string): string | null {
   if (!header) return null
   for (const part of header.split(';')) {
     const eq = part.indexOf('=')

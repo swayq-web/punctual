@@ -38,6 +38,7 @@ exist upstream.
 - Calendar sync (durable, fail-closed): `migrations/0018_calendar_sync_state.sql`, `src/adapters/{calendar-sync-alerts,calendar-sync-errors,calendar-sync-redrive,coordinator,providers,scheduled}.ts`, `src/adapters/d1/{repositories,schema}.ts`, `src/adapters/google/{get-event,internal-meetings,provider}.ts`, `src/adapters/microsoft/{get-event,provider}.ts`, `src/adapters/queue/consumer.ts`, `src/core/domain/{booking-service,calendar-sync,types}.ts`, `src/engine.ts`, `src/ports.ts`, `src/http/{calendar-connect,dashboard-routes}.ts`, `src/http/api/rest.ts`, `src/http/mcp/server.ts`, `src/index.ts`, `src/testing/fakes.ts`
 - Internal API (new, service binding to the swayq Worker): `src/internal/{contract,entrypoint,schemas,service,token}.ts`, `docs/internal-api.md`
 - Deploy and config: `wrangler.production.toml`, `wrangler.staging.toml` (new), `wrangler.toml` (DLQ consumer block), `.github/workflows/swayq-deploy.yml` (new), `.github/workflows/ci.yml` (token permissions), `.gitignore`, `docs/self-hosting.md`, `SWAYQ.md`
+- Upstream pages switch: `UPSTREAM_PAGES` (`src/swayq-surfaces.ts`, `EngineConfig.upstreamPages`), read in `src/http/router.ts` (`/` redirect, `/docs*` and `/calendly-alternative` 404), `src/http/pages/{booking,dashboard,home,legal}.ts`, `src/http/og/route.ts`; `test/workers/swayq-no-upstream.test.ts` (new) fails if a guest page, staff page or mail names the upstream project
 - Hardening (SWA-1290): `src/log-redact.ts` (new, URL redaction), `app.onError` in `src/http/router.ts`, `readSurfaceBody` in `src/swayq-surfaces.ts`
 - Avatars: `src/adapters/storage/r2-blob.ts` (null storage when no AVATARS binding), `Env.AVATARS` now optional
 - Tests: `test/core/*` and `test/workers/*` for each area above; `test/workers/surface-body-gate.test.ts` and `test/core/log-redact.test.ts` cover the hardening
@@ -90,6 +91,11 @@ encrypted with it).
 - Set as vars: `BASE_URL`, `BRAND_NAME`, `LEGAL_OPERATOR`, `FROM_EMAIL`,
   `FROM_NAME`, `SUPPORT_EMAIL`, `EMAIL_PROVIDER`, `SIGNUPS` (`@swayq.com`, the
   `@domain` suffix form from `parseSignupPolicy`), `TELEMETRY_ENABLED`.
+- `UPSTREAM_PAGES = "0"` in both SwayQ configs (unset is off too): `/`
+  redirects to `/login` (signed out) or `/dashboard` (signed in), `/docs*` and
+  `/calendly-alternative` answer 404, and no page carries the upstream
+  attribution, docs links or "open source" legal sections. `wrangler.toml`
+  (the upstream template) sets `"1"`, which restores all of it.
 - `INTERNAL_ALLOWED_DOMAINS` (var) and `INTERNAL_SERVICE_TOKEN` (secret) are
   read by the `InternalApi` named entrypoint (`src/internal/entrypoint.ts`,
   exported from `src/index.ts`; swayq binds it as a service binding). Unset

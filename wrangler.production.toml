@@ -97,6 +97,9 @@ TURNSTILE_REQUIRED = "true"
 # terraform output booking_turnstile_site_keys.production (public)
 TURNSTILE_SITE_KEY = "0x4AAAAAAFYMw8x5hqEEZ_MO"
 TELEMETRY_ENABLED = "0"
+# Off: no upstream landing at /, no /docs or /calendly-alternative, no upstream
+# attribution on any page. / redirects to /login or /dashboard. Unset is off too.
+UPSTREAM_PAGES = "0"
 
 # Secrets (pushed by the deploy workflow, never in this file):
 #   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ENCRYPTION_KEY_V1, SIGNING_KEY,

@@ -18,6 +18,7 @@ import { renderOgCard } from './render.js'
 import type { OgAvatar } from './card.js'
 import { resolveHosts } from '../../core/domain/hosts.js'
 import { joinNames } from '../pages/booking.js'
+import { upstreamPages } from '../../swayq-surfaces.js'
 import { toPng } from '../../adapters/image/resize.js'
 import { fitKeyFor, readImageDimensions } from '../../core/domain/media.js'
 
@@ -111,7 +112,9 @@ export function buildOgRoutes(ports: EnginePorts): Hono<{ Bindings: Env }> {
         extraCount: logoKey ? 0 : Math.max(0, hosts.length - shown.length),
       })
     })
-    if (!png) return c.redirect(DEFAULT_CARD_PATH, 302)
+    // The static default card is the upstream product card; without
+    // UPSTREAM_PAGES there is no preview image rather than that one.
+    if (!png) return upstreamPages() ? c.redirect(DEFAULT_CARD_PATH, 302) : c.notFound()
 
     await safePut(ports, cacheKey, png)
     return pngResponse(c, png)

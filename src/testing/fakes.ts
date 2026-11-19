@@ -617,6 +617,9 @@ export function fakeConfig(overrides: Partial<EngineConfig> = {}): EngineConfig 
     // render the not-configured banner. Tests that want it override this.
     emailDelivery: 'brevo',
     telemetryEnabled: false,
+    // The fake is the upstream identity ("Punctual"), so it serves the
+    // upstream pages; SwayQ's configuration turns this off.
+    upstreamPages: true,
     ...overrides,
   }
 }

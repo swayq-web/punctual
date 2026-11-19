@@ -260,7 +260,7 @@ describe('teams page', () => {
     const reserved = await post('/dashboard/teams', { name: 'Shadow', slug: 'dashboard', csrf }, cookie)
     expect(reserved.status).toBe(400)
     const reservedHtml = await reserved.text()
-    expect(reservedHtml).toContain('That slug is reserved by Punctual — pick another')
+    expect(reservedHtml).toContain('That slug is reserved — pick another')
     // Directly under the slug input, before the format hint — not after it.
     expect(reservedHtml.indexOf('id="err-team-slug"')).toBeLessThan(reservedHtml.indexOf('Lowercase letters, numbers and hyphens, 2'))
     expect(await db.prepare('SELECT id FROM teams WHERE slug = ?').bind('dashboard').first()).toBeNull()
