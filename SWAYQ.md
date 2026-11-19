@@ -39,6 +39,7 @@ exist upstream.
 - Internal API (new, service binding to the swayq Worker): `src/internal/{contract,entrypoint,schemas,service,token}.ts`, `docs/internal-api.md`
 - Deploy and config: `wrangler.production.toml`, `wrangler.staging.toml` (new), `wrangler.toml` (DLQ consumer block), `.github/workflows/swayq-deploy.yml` (new), `.github/workflows/ci.yml` (token permissions), `.gitignore`, `docs/self-hosting.md`, `SWAYQ.md`
 - Upstream pages switch: `UPSTREAM_PAGES` (`src/swayq-surfaces.ts`, `EngineConfig.upstreamPages`), read in `src/http/router.ts` (`/` redirect, `/docs*` and `/calendly-alternative` 404), `src/http/pages/{booking,dashboard,home,legal}.ts`, `src/http/og/route.ts`; `test/workers/swayq-no-upstream.test.ts` (new) fails if a guest page, staff page or mail names the upstream project
+- Static assets: `assets/.assetsignore` (new) keeps the upstream images (`assets/brand/`, `assets/og/`) out of the upload, so only `assets/fonts/` is served; `test/core/served-assets.test.ts` (new) fails if anything else would be
 - Hardening (SWA-1290): `src/log-redact.ts` (new, URL redaction), `app.onError` in `src/http/router.ts`, `readSurfaceBody` in `src/swayq-surfaces.ts`
 - Avatars: `src/adapters/storage/r2-blob.ts` (null storage when no AVATARS binding), `Env.AVATARS` now optional
 - Tests: `test/core/*` and `test/workers/*` for each area above; `test/workers/surface-body-gate.test.ts` and `test/core/log-redact.test.ts` cover the hardening

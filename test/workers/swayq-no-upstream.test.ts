@@ -8,8 +8,11 @@
  *  - `/` never serves the upstream landing: signed out it redirects to
  *    `/login`, signed in to `/dashboard`;
  *  - `/docs*` and `/calendly-alternative` do not exist;
- *  - no guest page, staff page or mail contains "punctual", "github" or
- *    "Star on" (case-insensitive).
+ *  - no guest page, staff page or mail contains anything `FORBIDDEN` matches:
+ *    "punctual", "github", "Star on", "open source", "self-host", "MIT
+ *    licence", "calendly" (case-insensitive);
+ *  - the config the router runs with is the one `buildPorts` (src/index.ts)
+ *    makes from those vars, not a copy of that mapping.
  *
  * A new page or mail belongs in the lists below. The only text let through is
  * `ALLOWED`, each entry a machine identifier no person reads.
@@ -22,6 +25,7 @@ import productionToml from '../../wrangler.production.toml?raw'
 import stagingToml from '../../wrangler.staging.toml?raw'
 import templateToml from '../../wrangler.toml?raw'
 
+import { buildPorts, type Env as WorkerEnv } from '../../src/index.js'
 import { buildRouter } from '../../src/http/router.js'
 import { EMBED_MESSAGE_TYPE } from '../../src/http/embed.js'
 import { createD1Repositories } from '../../src/adapters/d1/repositories.js'
@@ -53,7 +57,12 @@ const STAFF_ID = 'usr_nou_staff'
 const ET_ID = 'et_nou_intro'
 const BOOKING_ID = 'bk_nou_manage'
 
-const FORBIDDEN = /punctual|github|star on/i
+/**
+ * The upstream project by name, its marketing, and its "open source,
+ * self-host it" pitch (the Self-hosting and Open source sections of /privacy
+ * and /terms, the docs links). None of it applies to SwayQ's booking site.
+ */
+const FORBIDDEN = /punctual|github|star on|open[ -]source|self-host|mit licen[cs]e|calendly/i
 
 /**
  * Machine identifiers that carry the upstream name and are not shown to
@@ -83,18 +92,14 @@ function wranglerVars(toml: string): Record<string, string> {
   return vars
 }
 
-/** The same mapping `createPorts` (src/index.ts) applies to the deployment's vars. */
+/**
+ * The config the Worker itself builds: `buildPorts` (src/index.ts) run on the
+ * test bindings with the deployment's vars laid over them, plus a stand-in for
+ * the one secret the vars name a provider for. Nothing is mapped by hand here,
+ * so a change to that mapping (say, `upstreamPages` forced on) fails below.
+ */
 function configFrom(vars: Record<string, string>): EngineConfig {
-  return fakeConfig({
-    baseUrl: vars['BASE_URL']!,
-    brandName: vars['BRAND_NAME']!,
-    legalOperator: vars['LEGAL_OPERATOR']!,
-    supportEmail: vars['SUPPORT_EMAIL']!,
-    fromEmail: vars['FROM_EMAIL']!,
-    fromName: vars['FROM_NAME']!,
-    emailDelivery: 'resend',
-    upstreamPages: parseSwitch(vars['UPSTREAM_PAGES']),
-  })
+  return buildPorts({ ...env, ...vars, RESEND_API_KEY: 're_test' } as WorkerEnv).config
 }
 
 const crypto_ = createWebCrypto({
@@ -218,7 +223,33 @@ describe.each(SWAYQ_CONFIGS)('SwayQ deployment (%s)', (_file, toml) => {
 
   it('is configured as SwayQ with the upstream pages off', () => {
     expect(vars['BRAND_NAME']).toBe('SwayQ')
+    expect(vars['UPSTREAM_PAGES']).toBe('0')
     expect(config.upstreamPages).toBe(false)
+  })
+
+  it('the Worker builds its config from these vars', () => {
+    expect(config).toMatchObject({
+      baseUrl: vars['BASE_URL'],
+      brandName: 'SwayQ',
+      legalOperator: vars['LEGAL_OPERATOR'],
+      supportEmail: vars['SUPPORT_EMAIL'],
+      fromEmail: vars['FROM_EMAIL'],
+      fromName: 'SwayQ',
+      emailDelivery: 'resend',
+      upstreamPages: false,
+    })
+    expect(config.emailProblem).toBeUndefined()
+  })
+
+  it('the Worker turns the upstream pages on only when the var says so', () => {
+    // The test bindings come from wrangler.toml, where the var is "1"; it is replaced here, never inherited.
+    const withVar = (value: string | undefined): boolean | undefined =>
+      buildPorts({ ...env, ...vars, RESEND_API_KEY: 're_test', UPSTREAM_PAGES: value } as WorkerEnv).config.upstreamPages
+    expect(withVar(undefined)).toBe(false)
+    expect(withVar('0')).toBe(false)
+    expect(withVar('false')).toBe(false)
+    expect(withVar('1')).toBe(true)
+    expect(withVar('true')).toBe(true)
   })
 
   describe('the root address', () => {
@@ -289,6 +320,12 @@ describe.each(SWAYQ_CONFIGS)('SwayQ deployment (%s)', (_file, toml) => {
     ['/terms', 200],
     ['/robots.txt', 200],
     ['/embed.js', 200],
+    // Not uploaded as assets (assets/.assetsignore), so they reach the Worker, which has no such page.
+    ['/og/default.png', 404],
+    ['/brand/social-preview.png', 404],
+    ['/brand/screenshot-booking.png', 404],
+    ['/brand/wordmark-dark.svg', 404],
+    ['/brand/wordmark-light.svg', 404],
     ['/favicon.svg', 200],
     ['/auth/verify?token=not-a-token', 400],
     ['/health', 200],
@@ -466,6 +503,10 @@ describe('with UPSTREAM_PAGES on (wrangler.toml, the upstream template)', () => 
   const vars = wranglerVars(templateToml)
   const site = deployment(fakeConfig({ upstreamPages: parseSwitch(vars['UPSTREAM_PAGES']) }))
 
+  it('the Worker reads the template as on', () => {
+    expect(buildPorts({ ...env, UPSTREAM_PAGES: vars['UPSTREAM_PAGES'] } as WorkerEnv).config.upstreamPages).toBe(true)
+  })
+
   it('the template turns the switch on', () => {
     expect(vars['UPSTREAM_PAGES']).toBe('1')
   })
@@ -481,6 +522,17 @@ describe('with UPSTREAM_PAGES on (wrangler.toml, the upstream template)', () => 
   it('the guard itself catches the upstream pages', async () => {
     expect(leak(await (await site.get('/')).text())).not.toBeNull()
     expect(leak(await (await site.get('/login')).text())).not.toBeNull()
+  })
+
+  it('the guard catches the Self-hosting and Open source legal sections by their wording alone', async () => {
+    const privacy = await (await site.get('/privacy')).text()
+    const terms = await (await site.get('/terms')).text()
+    expect(privacy).toContain('<h2>Self-hosting</h2>')
+    expect(terms).toContain('<h2>Open source</h2>')
+    // With the project's name and the footer attribution taken out, what is left to catch is the wording.
+    const unnamed = (html: string): string => html.replace(/punctual|github|star on/gi, '')
+    expect(leak(unnamed(privacy))).toMatch(/open source/i)
+    expect(leak(unnamed(terms))).toMatch(/open source|MIT licence/i)
   })
 })
 
