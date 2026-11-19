@@ -12,6 +12,7 @@
  */
 
 import { escapeHtml } from './booking.js'
+import { upstreamPages } from '../../swayq-surfaces.js'
 
 export interface LegalPageOptions {
   brandName: string
@@ -114,12 +115,16 @@ portability and objection. Contact
 identifiers and API keys are stored only as hashes. Links in emails that let a
 guest reschedule or cancel are signed and expire.</p>
 
-<h2>Self-hosting</h2>
+${
+  upstreamPages()
+    ? `<h2>Self-hosting</h2>
 
 <p>${escapeHtml(o.brandName)} is open source. If you run your own instance, you
 are the data controller for it: your data stays in your own infrastructure and
 this policy does not apply to it.</p>
-
+`
+    : ''
+}
 <h2>Contact</h2>
 <p><a href="mailto:${escapeHtml(o.supportEmail)}">${escapeHtml(o.supportEmail)}</a></p>`,
   )
@@ -164,11 +169,15 @@ to the people you are meeting, and send it to your calendar provider.</p>
 suspend an account that abuses the service or puts other users at risk, and
 will say why when we do.</p>
 
-<h2>Open source</h2>
+${
+  upstreamPages()
+    ? `<h2>Open source</h2>
 <p>The ${escapeHtml(o.brandName)} engine is released under the MIT licence and
 you are free to run it yourself. These terms apply only to the hosted service —
 not to your own deployment.</p>
-
+`
+    : ''
+}
 <h2>Changes</h2>
 <p>If we change these terms materially, we will say so before the change takes
 effect.</p>

@@ -25,7 +25,7 @@ import { localDateString, offsetLabel } from '../../core/time/zone.js'
 import { embedResizeScriptTag } from '../embed.js'
 import { pageCss } from '../styles.js'
 import { guestPageCss, SWAYQ_FONT_FILES, SWAYQ_PAGE } from '../swayq-skin.js'
-import { SWAYQ_SURFACES } from '../../swayq-surfaces.js'
+import { SWAYQ_SURFACES, upstreamPages } from '../../swayq-surfaces.js'
 import {
   formatDateTime,
   formatLocalDate,
@@ -223,6 +223,14 @@ export function shellFoot(
       : `<p class="pu-foot">${tHtml(guest.locale, 'foot.scheduling', { mark })}</p>`
     return `</div>
 ${poweredBy ? foot : ''}
+${embed ? embedResizeScriptTag() : ''}
+</body></html>`
+  }
+  if (!upstreamPages()) {
+    // UPSTREAM_PAGES off: no attribution to the upstream project and no
+    // tagline. The company line stays when there is one.
+    return `</div>
+${poweredBy && operator ? `<p class="pu-foot">${escapeHtml(operator)}</p>` : ''}
 ${embed ? embedResizeScriptTag() : ''}
 </body></html>`
   }

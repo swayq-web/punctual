@@ -1,0 +1,5 @@
+# Upstream product images. Not uploaded, so the assets binding never serves
+# them: no /brand/* and no /og/default.png on any deployment of this fork.
+# Only fonts/ is served (test/core/served-assets.test.ts).
+brand/
+og/

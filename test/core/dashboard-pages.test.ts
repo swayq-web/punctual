@@ -6,9 +6,16 @@
  * shown, and what the shell says to a host who has no name yet.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ApiKey, CalendarConnection, User } from '../../src/core/domain/types.js'
 import { apiKeysPage, connectionsPage, revokeKeyPage, settingsPage } from '../../src/http/pages/dashboard.js'
+import { setUpstreamPages } from '../../src/swayq-surfaces.js'
+
+// These assert the upstream attribution, which only renders with the
+// UPSTREAM_PAGES switch on (src/swayq-surfaces.ts). Off is covered by
+// test/workers/swayq-no-upstream.test.ts.
+beforeAll(() => setUpstreamPages(true))
+afterAll(() => setUpstreamPages(false))
 
 const user: User = {
   id: 'u_host',

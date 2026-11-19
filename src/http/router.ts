@@ -18,7 +18,7 @@ import { streamPage } from './streaming.js'
 import { buildApiRoutes } from './api/rest.js'
 import { buildMcpRoutes } from './mcp/server.js'
 import { buildEmbedRoutes } from './embed.js'
-import { buildDashboardRoutes } from './dashboard-routes.js'
+import { buildDashboardRoutes, readCookie } from './dashboard-routes.js'
 import { buildOgRoutes } from './og/route.js'
 import { buildAvatarRoutes } from './avatars/route.js'
 import { privacyPage, termsPage } from './pages/legal.js'
@@ -59,7 +59,17 @@ import {
   type Locale,
   type MessageKey,
 } from '../core/i18n/index.js'
-import { SWAYQ_SURFACES, blockedByForm, blockedSurface, needsBodyCheck, readSurfaceBody } from '../swayq-surfaces.js'
+import {
+  SWAYQ_SURFACES,
+  blockedByForm,
+  blockedSurface,
+  isUpstreamPagePath,
+  needsBodyCheck,
+  readSurfaceBody,
+  setUpstreamPages,
+} from '../swayq-surfaces.js'
+import { SESSION_COOKIE_NAME } from '../core/domain/auth-service.js'
+import { validateSession } from '../core/domain/auth-flows.js'
 import {
   GUEST_EMAIL_DAILY_LIMIT,
   GUEST_EMAIL_WINDOW_MS,
@@ -113,7 +123,11 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
   // SwayQ surface switches (src/swayq-surfaces.ts): an unmounted upstream
   // surface answers like any unknown URL. One middleware, first in line, so
   // no route below can be reached around it. `/mcp` is simply not mounted.
+  const upstream = ports.config.upstreamPages === true
+  setUpstreamPages(upstream)
   app.use('*', async (c, next) => {
+    // The deployment's UPSTREAM_PAGES switch, for the page renderers.
+    setUpstreamPages(upstream)
     // Hono routes on the DECODED path, so the gate must too: `/auth/%6Dicrosoft`
     // reaches the same handler as `/auth/microsoft`. Check the router's own
     // view (`c.req.path`) and a full decode, so neither spelling slips past.
@@ -125,6 +139,8 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
       decoded = path
     }
     if (blockedSurface(path) || blockedSurface(decoded)) return notFound(c, ports)
+    // The upstream docs and comparison pages exist only with UPSTREAM_PAGES on.
+    if (!upstream && (isUpstreamPagePath(path) || isUpstreamPagePath(decoded))) return notFound(c, ports)
     if ((c.req.method === 'POST' || c.req.method === 'PATCH') && needsBodyCheck(decoded)) {
       // Some switches live in the body (a Telegram channel, a team-owned
       // event type). Read a clone, so the real handler still gets an unread body.
@@ -191,6 +207,21 @@ export function buildRouter(ports: EnginePorts, slots: SlotService): Hono<{ Bind
           ...(ports.config.legalOperator ? { operator: ports.config.legalOperator } : {}),
         }),
       )
+    }
+    if (!upstream) {
+      // No upstream landing on this deployment (UPSTREAM_PAGES is off): the
+      // root is only a way in. Signed in goes to the dashboard, everyone
+      // else to sign-in. Never cached, since the answer depends on the cookie.
+      const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE_NAME)
+      const auth = cookie
+        ? await validateSession(
+            { repos: ports.repositories({ consistency: 'bookmark' }), crypto: ports.crypto },
+            cookie,
+            ports.clock.now(),
+          )
+        : null
+      c.header('cache-control', 'no-store')
+      return c.redirect(auth ? '/dashboard' : '/login', 302)
     }
     return c.html(
       landingPage({

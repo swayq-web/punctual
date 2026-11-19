@@ -12,6 +12,13 @@ afterAll(() => {
 import type { EventType } from '../../src/core/domain/types.js'
 import { homeFeatured, homeGroups, homeItems, isEmailAddress, isHttpUrl, parseHomeSettings, type HomeItem, type HomeOwner } from '../../src/core/domain/home.js'
 import { instanceHomePage, linkify } from '../../src/http/pages/home.js'
+import { setUpstreamPages } from '../../src/swayq-surfaces.js'
+
+// These assert the upstream attribution, which only renders with the
+// UPSTREAM_PAGES switch on (src/swayq-surfaces.ts). Off is covered by
+// test/workers/swayq-no-upstream.test.ts.
+beforeAll(() => setUpstreamPages(true))
+afterAll(() => setUpstreamPages(false))
 
 function eventType(patch: Partial<EventType>): EventType {
   return {

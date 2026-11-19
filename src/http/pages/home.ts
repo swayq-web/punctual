@@ -11,6 +11,7 @@
 import type { CompanyLogo } from '../../core/domain/types.js'
 import type { HomeGroup, HomeItem, HomeOwner } from '../../core/domain/home.js'
 import { avatarHtml, escapeHtml, logoHtml, shellHead } from './booking.js'
+import { upstreamPages } from '../../swayq-surfaces.js'
 
 export interface InstanceHomeData {
   brandName: string
@@ -168,7 +169,7 @@ export function instanceHomePage(d: InstanceHomeData): string {
   ]
     .filter(Boolean)
     .join(' <span aria-hidden="true">·</span> ')}</p>
-  <p class="pu-home-foot-by">Scheduling by <a class="pu-mark" href="${PUNCTUAL_SITE_URL}" target="_blank" rel="noopener">punctual<span>:</span></a> <span aria-hidden="true">·</span> <a href="/login">Sign in</a></p>
+  <p class="pu-home-foot-by">${upstreamPages() ? `Scheduling by <a class="pu-mark" href="${PUNCTUAL_SITE_URL}" target="_blank" rel="noopener">punctual<span>:</span></a> <span aria-hidden="true">·</span> ` : ''}<a href="/login">Sign in</a></p>
 </footer>
 </body></html>`
   )

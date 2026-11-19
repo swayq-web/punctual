@@ -1055,6 +1055,8 @@ export interface EngineConfig {
    */
   emailProblem?: string
   /** Off unless explicitly enabled (ADR-0006 §5). */
+  /** UPSTREAM_PAGES: serve the upstream landing, docs and attribution (src/swayq-surfaces.ts). Off when absent. */
+  upstreamPages?: boolean
   telemetryEnabled: boolean
   /** Abuse-limit overrides; operator-tunable. */
   rateLimits?: Partial<Record<string, { limit: number; windowSeconds: number }>>

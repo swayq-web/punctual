@@ -41,6 +41,43 @@ export const SWAYQ_SURFACES: SurfaceFlags = {
 
 export type SurfaceName = keyof SurfaceFlags
 
+/**
+ * The upstream product pages: the marketing landing at `/`, `/docs*`,
+ * `/calendly-alternative`, and every line or link that names the upstream
+ * project (footers, dashboard docs links, the "open source" legal sections,
+ * the static link-preview card).
+ *
+ * Unlike the flags above this one is per DEPLOYMENT: it is the `UPSTREAM_PAGES`
+ * var (`EngineConfig.upstreamPages`). `wrangler.toml`, the upstream self-host
+ * template, turns it on; SwayQ's `wrangler.staging.toml` and
+ * `wrangler.production.toml` turn it off, and an unset var is off too, so a
+ * config that forgets it never shows upstream marketing.
+ *
+ * The router copies the config value here on every request, so page renderers
+ * read one switch instead of each taking another parameter. A deployment has
+ * one value for its whole life, so this is a constant in practice.
+ */
+let upstreamPagesOn = false
+
+/** "1" or "true" (any case) is on; anything else, or unset, is off. */
+export function parseSwitch(value: string | undefined | null): boolean {
+  const v = (value ?? '').trim().toLowerCase()
+  return v === '1' || v === 'true'
+}
+
+export function setUpstreamPages(on: boolean): void {
+  upstreamPagesOn = on
+}
+
+export function upstreamPages(): boolean {
+  return upstreamPagesOn
+}
+
+/** Paths that exist only as upstream product pages. `/` is not here: it redirects instead (router). */
+export function isUpstreamPagePath(pathname: string): boolean {
+  return under(pathname, '/docs') || pathname === '/calendly-alternative'
+}
+
 function under(pathname: string, base: string): boolean {
   return pathname === base || pathname.startsWith(`${base}/`)
 }

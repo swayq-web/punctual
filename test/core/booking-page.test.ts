@@ -11,6 +11,13 @@ afterAll(() => {
 })
 import type { EventType, Slot, User } from '../../src/core/domain/types.js'
 import { eventHeader, hostsRow, joinNames, monthGrid, shellFoot, slotList, type BookingPageData } from '../../src/http/pages/booking.js'
+import { setUpstreamPages } from '../../src/swayq-surfaces.js'
+
+// These assert the upstream attribution, which only renders with the
+// UPSTREAM_PAGES switch on (src/swayq-surfaces.ts). Off is covered by
+// test/workers/swayq-no-upstream.test.ts.
+beforeAll(() => setUpstreamPages(true))
+afterAll(() => setUpstreamPages(false))
 
 const host: User = {
   id: 'u_host',

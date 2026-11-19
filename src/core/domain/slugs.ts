@@ -68,7 +68,7 @@ export function validateSlug(raw: string): SlugValidation {
   if (RESERVED_SLUGS.has(slug)) {
     // "reserved", not "taken": the host did nothing wrong and no one else
     // has it — the word is ours, and saying so avoids a hunt for who owns it.
-    return { ok: false, reason: 'reserved', message: 'That slug is reserved by Punctual — pick another' }
+    return { ok: false, reason: 'reserved', message: 'That slug is reserved — pick another' }
   }
   return { ok: true }
 }

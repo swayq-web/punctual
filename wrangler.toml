@@ -131,6 +131,10 @@ FROM_NAME = "Punctual"
 SUPPORT_EMAIL = "you@your-domain.example"
 # Off unless explicitly enabled (ADR-0006 §5).
 TELEMETRY_ENABLED = "0"
+# The product landing at /, /docs and the project attribution. On in this
+# template; unset or "0" turns them off and / redirects to sign-in
+# (src/swayq-surfaces.ts).
+UPSTREAM_PAGES = "1"
 
 # Cloudflare Turnstile on the booking confirm form (SwayQ guest UI). The site
 # key is public; TURNSTILE_REQUIRED turns enforcement on, and from then on a
