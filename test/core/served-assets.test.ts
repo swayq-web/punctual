@@ -55,6 +55,10 @@ describe('static assets', () => {
     expect(served).not.toContain(file)
   })
 
+  it('serves only font files and their licences from fonts/', () => {
+    for (const file of served) expect(file).toMatch(/^fonts\/([a-z0-9-]+\.woff2|OFL-[A-Za-z]+\.txt)$/)
+  })
+
   it('names nothing upstream in a served file name', () => {
     for (const file of served) expect(file).not.toMatch(/punctual|github/i)
   })
